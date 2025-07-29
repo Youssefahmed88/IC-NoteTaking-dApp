@@ -14,5 +14,12 @@
   "type": "module",
   "workspaces": [
     "src/NoteTakingdApp_frontend"
-  ]
+  ],
+  "dependencies": {
+    "@dfinity/agent": "^0.20.0",
+    "@dfinity/auth-client": "^0.20.0",
+    "@dfinity/identity": "^0.20.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "lucide-react": "^0.533.0"
+  }
 }

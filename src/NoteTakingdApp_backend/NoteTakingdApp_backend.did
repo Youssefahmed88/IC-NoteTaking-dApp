@@ -1,3 +1,9 @@
+type Note = record { title : text; content : text };
+type Result = variant { Ok : text; Err : text };
 service : {
-    "greet": (text) -> (text) query;
+  add_note : (nat64, Note) -> (opt Note);
+  delete_note : (nat64) -> (Result);
+  get_note : (nat64) -> (opt Note) query;
+  list_notes : () -> (vec record { nat64; Note }) query;
+  update_note : (nat64, Note) -> (opt Note);
 }
