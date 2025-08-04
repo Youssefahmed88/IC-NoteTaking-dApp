@@ -66,19 +66,38 @@ thread_local! {
             MEMORY_MANAGER.with(|mm| mm.borrow().get(MemoryId::new(0)))
         )
     );
+
+    static BALANCES: RefCell<StableBTreeMap<StorablePrincipal, u64, Memory>> = RefCell::new(
+        StableBTreeMap::init(
+            MEMORY_MANAGER.with(|mm| mm.borrow().get(MemoryId::new(1)))
+        )
+    );
 }
 
 #[update]
-fn add_note(key: u64, value: Note) -> Option<Note> {
+fn add_note(key: u64, value: Note) -> Result<Note, String> {
+    let user = caller();
+    let cost = 10;
+
+    let balance = BALANCES.with(|b| b.borrow().get(&StorablePrincipal(user)).clone().unwrap_or(0));
+    if balance < cost {
+        return Err("Insufficient balance".to_string());
+    }
+
+    update_balance(user, -(cost as i64));
+
     let note = Note {
         title: value.title,
         content: value.content,
     };
+
     NOTES_MAP.with(|notes| {
-        notes.borrow_mut().insert((StorablePrincipal(caller()), key), note.clone());
-        Some(note)
-    })
+        notes.borrow_mut().insert((StorablePrincipal(user), key), note.clone());
+    });
+
+    Ok(note)
 }
+
 
 #[update]
 fn update_note(key: u64, value: Note) -> Option<Note> {
@@ -130,6 +149,40 @@ fn delete_note(id: u64) -> Result<String, String> {
             Err(format!("Note {} not found or you are not the owner.", id))
         }
     })
+}
+
+fn update_balance(user: Principal, amount: i64) {
+    BALANCES.with(|balances| {
+        let mut balances = balances.borrow_mut();
+        let key = StorablePrincipal(user);
+        let current = balances.get(&key).unwrap_or(0).clone();
+        let new_balance = if amount.is_positive() {
+            current.saturating_add(amount as u64)
+        } else {
+            current.saturating_sub(amount.abs() as u64)
+        };
+        balances.insert(key, new_balance);
+    });
+}
+
+#[query]
+fn balance_of() -> u64 {
+    BALANCES.with(|balances| {
+        balances.borrow().get(&StorablePrincipal(caller())).clone().unwrap_or(0)
+    })
+}
+
+fn admin_principal() -> Principal {
+    Principal::from_text("4bzqg-wgg6k-6m3bz-re2wh-kxkj4-m6hmv-b44lw-dmti3-uhwzw-u52jj-dqe").unwrap() 
+}
+
+#[update]
+fn mint(to: Principal, amount: u64) -> Result<(), String> {
+    if caller() != admin_principal() {
+        return Err("Unauthorized".to_string());
+    }
+    update_balance(to, amount as i64);
+    Ok(())
 }
 
 export_candid!();

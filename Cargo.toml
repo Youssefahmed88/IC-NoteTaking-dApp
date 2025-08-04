@@ -1,5 +1,6 @@
 [workspace]
 members = [
-    "src/NoteTakingdApp_backend"
+    "src/NoteTakingdApp_backend",
+    "src/my_token"
 ]
 resolver = "2"

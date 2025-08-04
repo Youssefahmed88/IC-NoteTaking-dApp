@@ -5,6 +5,11 @@
       "package": "NoteTakingdApp_backend",
       "type": "rust"
     },
+    "icrc1_ledger_canister": {
+      "type": "custom",
+      "candid": "https://raw.githubusercontent.com/dfinity/ic/615045e039c57ed842c689e49a07ab3de3a8a781/rs/ledger_suite/icrc1/ledger/ledger.did",
+      "wasm": "https://download.dfinity.systems/ic/615045e039c57ed842c689e49a07ab3de3a8a781/canisters/ic-icrc1-ledger.wasm.gz"
+    },
     "NoteTakingdApp_frontend": {
       "dependencies": [
         "NoteTakingdApp_backend"
@@ -15,24 +20,18 @@
       "type": "assets",
       "workspace": "NoteTakingdApp_frontend"
     },
-    "internet_identity": {
-      "candid": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity.did",
-      "type": "custom",
-      "specified_id": "rdmx6-jaaaa-aaaaa-aaadq-cai",
-      "remote": {
-        "id": {
-          "ic": "rdmx6-jaaaa-aaaaa-aaadq-cai"
-        }
-      },
-      "wasm": "https://github.com/dfinity/internet-identity/releases/latest/download/internet_identity_dev.wasm.gz"
-    }
-  },
+    
   "defaults": {
-    "build": {
-      "args": "",
-      "packtool": ""
+  "build": {
+    "args": "",
+    "packtool": "",
+    "limits": {
+      "instruction_limit": 2000000000000
     }
-  },
+  }
+},
   "output_env_file": ".env",
   "version": 1
 }
+}
+
