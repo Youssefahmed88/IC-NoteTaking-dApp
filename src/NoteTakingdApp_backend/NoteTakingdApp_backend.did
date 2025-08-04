@@ -1,13 +1,11 @@
 type Note = record { title : text; content : text };
 type Result = variant { Ok : Note; Err : text };
 type Result_1 = variant { Ok : text; Err : text };
-type Result_2 = variant { Ok; Err : text };
+
 service : {
-  add_note : (nat64, Note) -> (Result);
-  balance_of : () -> (nat64) query;
+  add_note : (nat64, Note) -> (Result_1);
   delete_note : (nat64) -> (Result_1);
   get_note : (nat64) -> (opt Note) query;
   list_notes : () -> (vec record { nat64; Note }) query;
-  mint : (principal, nat64) -> (Result_2);
-  update_note : (nat64, Note) -> (opt Note);
-}
+  update_note : (nat64, Note) -> (Result_1);
+};

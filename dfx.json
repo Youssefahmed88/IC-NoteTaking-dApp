@@ -19,19 +19,17 @@
       ],
       "type": "assets",
       "workspace": "NoteTakingdApp_frontend"
-    },
-    
-  "defaults": {
-  "build": {
-    "args": "",
-    "packtool": "",
-    "limits": {
-      "instruction_limit": 2000000000000
     }
-  }
-},
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": "",
+      "limits": {
+        "instruction_limit": 2000000000000
+      }
+    }
+  },
   "output_env_file": ".env",
   "version": 1
 }
-}
-

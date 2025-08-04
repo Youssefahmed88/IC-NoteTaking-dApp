@@ -1,14 +1,13 @@
 use candid::{CandidType, Decode, Deserialize, Encode, Principal};
-use ic_cdk::{export_candid, query, update};
+use ic_cdk::{call, export_candid, query, update};
+use num_traits::ToPrimitive;
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
     storable::{BoundedStorable, Storable},
     StableBTreeMap, DefaultMemoryImpl,
 };
 use std::{borrow::Cow, cell::RefCell};
-use ic_cdk::api::caller;
 
-// Custom Principal wrapper to implement BoundedStorable and Default
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StorablePrincipal(Principal);
 
@@ -23,7 +22,7 @@ impl Storable for StorablePrincipal {
 }
 
 impl BoundedStorable for StorablePrincipal {
-    const MAX_SIZE: u32 = 29; // Max size of a Principal
+    const MAX_SIZE: u32 = 29;
     const IS_FIXED_SIZE: bool = false;
 }
 
@@ -66,25 +65,109 @@ thread_local! {
             MEMORY_MANAGER.with(|mm| mm.borrow().get(MemoryId::new(0)))
         )
     );
-
-    static BALANCES: RefCell<StableBTreeMap<StorablePrincipal, u64, Memory>> = RefCell::new(
-        StableBTreeMap::init(
-            MEMORY_MANAGER.with(|mm| mm.borrow().get(MemoryId::new(1)))
-        )
-    );
 }
 
-#[update]
-fn add_note(key: u64, value: Note) -> Result<Note, String> {
-    let user = caller();
-    let cost = 10;
+// --- Ledger Related Structs ---
+#[derive(CandidType, Deserialize)]
+struct Account {
+    owner: Principal,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subaccount: Option<Vec<u8>>,
+}
 
-    let balance = BALANCES.with(|b| b.borrow().get(&StorablePrincipal(user)).clone().unwrap_or(0));
-    if balance < cost {
-        return Err("Insufficient balance".to_string());
+#[derive(CandidType, Deserialize)]
+struct TransferArg {
+    from_subaccount: Option<Vec<u8>>,
+    to: Account,
+    amount: Nat,                // ✅ لازم Nat
+    fee: Option<Nat>,          // ✅ لازم Nat
+    memo: Option<Vec<u8>>,
+    created_at_time: Option<u64>,
+}
+
+
+#[derive(CandidType, Deserialize)]
+enum TransferResult {
+    Ok(u64),
+    Err(TransferError),
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum TransferError {
+    InsufficientFunds { balance: u64 },
+    BadFee { expected_fee: u64 },
+    TxTooOld { allowed_window_nanos: u64 },
+    CreatedInFuture,
+    Duplicate { duplicate_of: u64 },
+    TemporarilyUnavailable,
+    GenericError { error_code: u64, message: String },
+}
+
+const LEDGER_CANISTER_ID: &str = "uxrrr-q7777-77774-qaaaq-cai";
+const COST_PER_NOTE: u64 = 10_000; // Matches transfer_fee
+
+// ---- Helper Functions ----
+
+async fn check_balance(user: Principal) -> Result<u64, String> {
+    let account = Account { owner: user, subaccount: None };
+
+    let (balance_nat,): (Nat,) = call(
+        Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
+        "icrc1_balance_of",
+        (account,),
+    )
+    .await
+    .map_err(|e| format!("Ledger call failed: {:?}", e))?;
+
+    let balance_u64 = balance_nat.0.to_u64().ok_or("Balance too large for u64")?;
+
+    Ok(balance_u64)
+}
+
+
+use candid::Nat;
+
+async fn charge_user(user: Principal, amount: u64) -> Result<u64, String> {
+    let to_account = Account {
+        owner: Principal::from_text("uzt4z-lp777-77774-qaabq-cai").unwrap(), // Backend's principal
+        subaccount: None,
+    };
+
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: to_account,
+        amount: amount.into(),               
+        fee: Some(Nat::from(10_000u64)),     
+        memo: None,
+        created_at_time: None,
+    };
+
+    let result: (TransferResult,) = call(
+        Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
+        "icrc1_transfer",
+        (transfer_arg,),
+    )
+    .await
+    .map_err(|e| format!("Transfer failed: {:?}", e))?;
+
+    match result.0 {
+        TransferResult::Ok(tx_id) => Ok(tx_id),
+        TransferResult::Err(e) => Err(format!("Charge failed: {:?}", e)),
+    }
+}
+
+// ---- Canister Functions ----
+
+#[update]
+async fn add_note(key: u64, value: Note) -> Result<Note, String> {
+    let user = ic_cdk::caller();
+    let balance = check_balance(user).await?;
+
+    if balance < COST_PER_NOTE {
+        return Err("Insufficient token balance.".into());
     }
 
-    update_balance(user, -(cost as i64));
+    charge_user(user, COST_PER_NOTE).await?;
 
     let note = Note {
         title: value.title,
@@ -98,7 +181,6 @@ fn add_note(key: u64, value: Note) -> Result<Note, String> {
     Ok(note)
 }
 
-
 #[update]
 fn update_note(key: u64, value: Note) -> Option<Note> {
     let note = Note {
@@ -107,7 +189,7 @@ fn update_note(key: u64, value: Note) -> Option<Note> {
     };
 
     NOTES_MAP.with(|notes| {
-        notes.borrow_mut().insert((StorablePrincipal(caller()), key), note.clone());
+        notes.borrow_mut().insert((StorablePrincipal(ic_cdk::caller()), key), note.clone());
         Some(note)
     })
 }
@@ -115,7 +197,7 @@ fn update_note(key: u64, value: Note) -> Option<Note> {
 #[query]
 fn get_note(id: u64) -> Option<Note> {
     NOTES_MAP.with(|notes| {
-        notes.borrow().get(&(StorablePrincipal(caller()), id)).clone()
+        notes.borrow().get(&(StorablePrincipal(ic_cdk::caller()), id)).clone()
     })
 }
 
@@ -126,7 +208,7 @@ fn list_notes() -> Vec<(u64, Note)> {
             .borrow()
             .iter()
             .filter_map(|((owner, id), note)| {
-                if owner.0 == caller() {
+                if owner.0 == ic_cdk::caller() {
                     Some((id, note.clone()))
                 } else {
                     None
@@ -138,51 +220,17 @@ fn list_notes() -> Vec<(u64, Note)> {
 
 #[update]
 fn delete_note(id: u64) -> Result<String, String> {
-    let key = (StorablePrincipal(caller()), id);
+    let key = (StorablePrincipal(ic_cdk::caller()), id);
 
     NOTES_MAP.with(|notes| {
         let mut notes = notes.borrow_mut();
         if notes.contains_key(&key) {
             notes.remove(&key);
-            Ok(format!("Note {} deleted successfully.", id))
+            Ok(format!("Note {} deleted.", id))
         } else {
-            Err(format!("Note {} not found or you are not the owner.", id))
+            Err(format!("Note {} not found or not yours.", id))
         }
     })
-}
-
-fn update_balance(user: Principal, amount: i64) {
-    BALANCES.with(|balances| {
-        let mut balances = balances.borrow_mut();
-        let key = StorablePrincipal(user);
-        let current = balances.get(&key).unwrap_or(0).clone();
-        let new_balance = if amount.is_positive() {
-            current.saturating_add(amount as u64)
-        } else {
-            current.saturating_sub(amount.abs() as u64)
-        };
-        balances.insert(key, new_balance);
-    });
-}
-
-#[query]
-fn balance_of() -> u64 {
-    BALANCES.with(|balances| {
-        balances.borrow().get(&StorablePrincipal(caller())).clone().unwrap_or(0)
-    })
-}
-
-fn admin_principal() -> Principal {
-    Principal::from_text("4bzqg-wgg6k-6m3bz-re2wh-kxkj4-m6hmv-b44lw-dmti3-uhwzw-u52jj-dqe").unwrap() 
-}
-
-#[update]
-fn mint(to: Principal, amount: u64) -> Result<(), String> {
-    if caller() != admin_principal() {
-        return Err("Unauthorized".to_string());
-    }
-    update_balance(to, amount as i64);
-    Ok(())
 }
 
 export_candid!();

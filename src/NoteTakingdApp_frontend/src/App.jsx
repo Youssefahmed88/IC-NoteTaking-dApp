@@ -1,329 +1,512 @@
 import React, { useState, useEffect } from 'react';
-import { AuthClient } from '@dfinity/auth-client';
+import { Plus, Edit2, Trash2, Wallet, RefreshCw, LogIn, LogOut } from 'lucide-react';
+
+// IC Agent imports - install these packages:
+// npm install @dfinity/agent @dfinity/auth-client @dfinity/principal @dfinity/candid
+
+// Uncomment these imports when you install the packages:
 import { Actor, HttpAgent } from '@dfinity/agent';
+import { AuthClient } from '@dfinity/auth-client';
 import { Principal } from '@dfinity/principal';
-import { Plus, Edit, Trash2, LogOut, User, Save, X } from 'lucide-react';
-
-// Define the canister interface
-const idlFactory = ({ IDL }) => {
-  const Note = IDL.Record({ 'title': IDL.Text, 'content': IDL.Text });
-  return IDL.Service({
-    'add_note': IDL.Func([IDL.Nat64, Note], [IDL.Opt(Note)], []),
-    'update_note': IDL.Func([IDL.Nat64, Note], [IDL.Opt(Note)], []),
-    'get_note': IDL.Func([IDL.Nat64], [IDL.Opt(Note)], ['query']),
-    'list_notes': IDL.Func([], [IDL.Vec(IDL.Tuple(IDL.Nat64, Note))], ['query']),
-    'delete_note': IDL.Func([IDL.Nat64], [IDL.Variant({ 'Ok': IDL.Text, 'Err': IDL.Text })], []),
-  });
-};
-
-// Replace with your actual canister ID - get it from dfx canister id <canister_name>
-const CANISTER_ID = process.env.REACT_APP_CANISTER_ID || 'bkyz2-fmaaa-aaaaa-qaaaq-cai';
 
 const NotesApp = () => {
-  const [authClient, setAuthClient] = useState(null);
+  const [notes, setNotes] = useState([]);
+  const [balance, setBalance] = useState(0);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [editingNote, setEditingNote] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [newNote, setNewNote] = useState({ title: '', content: '' });
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [principal, setPrincipal] = useState(null);
   const [actor, setActor] = useState(null);
-  const [notes, setNotes] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [showAddForm, setShowAddForm] = useState(false);
-  const [editingNote, setEditingNote] = useState(null);
-  const [formData, setFormData] = useState({ title: '', content: '' });
+  const [authClient, setAuthClient] = useState(null);
+  const [error, setError] = useState('');
 
-  // Initialize auth client
+  // Replace with your actual canister ID
+  const CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
+  
+  // Internet Identity URL
+  const II_URL = process.env.NODE_ENV === 'production' 
+    ? 'https://identity.ic0.app'
+    : 'http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai';
+
+  // IDL Factory for your canister - matches your Rust backend
+  const idlFactory = ({ IDL }) => {
+    const Note = IDL.Record({ 
+      'title': IDL.Text, 
+      'content': IDL.Text 
+    });
+    
+    const Result = IDL.Variant({ 'Ok': Note, 'Err': IDL.Text });
+    const Result_1 = IDL.Variant({ 'Ok': IDL.Text, 'Err': IDL.Text });
+    const Result_2 = IDL.Variant({ 'Ok': IDL.Null, 'Err': IDL.Text });
+    
+    return IDL.Service({
+      'add_note': IDL.Func([IDL.Nat64, Note], [Result], []),
+      'update_note': IDL.Func([IDL.Nat64, Note], [IDL.Opt(Note)], []),
+      'get_note': IDL.Func([IDL.Nat64], [IDL.Opt(Note)], ['query']),
+      'list_notes': IDL.Func([], [IDL.Vec(IDL.Tuple(IDL.Nat64, Note))], ['query']),
+      'delete_note': IDL.Func([IDL.Nat64], [Result_1], []),
+      'balance_of': IDL.Func([], [IDL.Nat64], ['query']),
+      'mint': IDL.Func([IDL.Principal, IDL.Nat64], [Result_2], []),
+    });
+  };
+
+  // Initialize authentication on component mount
   useEffect(() => {
-    const initAuth = async () => {
-      try {
-        const client = await AuthClient.create({
-          idleOptions: {
-            idleTimeout: 1000 * 60 * 30, // 30 minutes
-            disableDefaultIdleCallback: true
-          }
-        });
-        setAuthClient(client);
-        
-        const isAuth = await client.isAuthenticated();
-        console.log('Is authenticated:', isAuth);
-        
-        if (isAuth) {
-          const identity = client.getIdentity();
-          const principal = identity.getPrincipal();
-          console.log('Existing principal:', principal.toString());
-          setPrincipal(principal);
-          await initActor(identity);
-        }
-      } catch (error) {
-        console.error('Failed to initialize auth:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     initAuth();
   }, []);
 
-  // Initialize actor with authenticated identity
-  const initActor = async (identity) => {
+  const initAuth = async () => {
     try {
-      // Always use localhost for development
-      const host = 'http://localhost:4943';
+      // TODO: Uncomment when packages are installed
+       const authClient = await AuthClient.create();
+       setAuthClient(authClient);
       
-      const agent = new HttpAgent({ 
-        identity,
-        host
-      });
+       if (await authClient.isAuthenticated()) {
+         await handleAuthenticated(authClient);
+       }
       
-      // Always fetch root key for local development
-      await agent.fetchRootKey();
-
-      const notesActor = Actor.createActor(idlFactory, {
-        agent,
-        canisterId: CANISTER_ID,
-      });
-
-      setActor(notesActor);
-      await loadNotes(notesActor);
+      console.log('Auth client would be initialized here');
+      setError('Please install @dfinity packages and uncomment the auth code');
     } catch (error) {
-      console.error('Failed to initialize actor:', error);
+      console.error('Auth initialization failed:', error);
+      setError('Auth initialization failed: ' + error.message);
     }
   };
 
-  // Load notes from canister
-  const loadNotes = async (actorInstance = actor) => {
-    if (!actorInstance) return;
+  const handleAuthenticated = async (authClient) => {
+    try {
+      // TODO: Uncomment when packages are installed
+      const identity = authClient.getIdentity();
+      const agent = new HttpAgent({ identity });
+      
+      // // Fetch root key for local development
+      if (process.env.NODE_ENV !== 'production') {
+        await agent.fetchRootKey();
+      }
+      
+      const actor = Actor.createActor(idlFactory, {
+      agent,
+         canisterId: CANISTER_ID,
+       });
+      
+       setActor(actor);
+       setPrincipal(identity.getPrincipal().toString());
+       setIsAuthenticated(true);
+      
+       await loadNotes();
+       await loadBalance();
+      
+      console.log('Would create actor and authenticate here');
+    } catch (error) {
+      console.error('Authentication failed:', error);
+      setError('Authentication failed: ' + error.message);
+    }
+  };
+
+  const login = async () => {
+    if (!authClient) {
+      setError('Auth client not initialized');
+      return;
+    }
     
     try {
-      const notesList = await actorInstance.list_notes();
-      setNotes(notesList.map(([id, note]) => ({ id: Number(id), ...note })));
-    } catch (error) {
-      console.error('Failed to load notes:', error);
-    }
-  };
-
-  // Login with Internet Identity
-  const login = async () => {
-    if (!authClient) return;
-
-    try {
-      await authClient.login({
-        identityProvider: `http://localhost:4943/?canisterId=be2us-64aaa-aaaaa-qaabq-cai#authorize`,
-        maxTimeToLive: BigInt(7 * 24 * 60 * 60 * 1000 * 1000 * 1000), // 7 days in nanoseconds
-        windowOpenerFeatures: "toolbar=0,location=0,menubar=0,width=500,height=500,left=100,top=100",
-        onSuccess: async () => {
-          setIsAuthenticated(true);
-          const identity = authClient.getIdentity();
-          const principal = identity.getPrincipal();
-          setPrincipal(principal);
-          await initActor(identity);
-        },
-        onError: (error) => {
-          console.error('Login error:', error);
-        }
-      });
+      setLoading(true);
+      setError('');
+      
+      // TODO: Uncomment when packages are installed
+       await authClient.login({
+         identityProvider: II_URL,
+         onSuccess: () => handleAuthenticated(authClient),
+         onError: (error) => {
+           console.error('Login error:', error);
+           setError('Login failed: ' + error);
+         }
+       });
+      
+      console.log('Would login with Internet Identity here');
+      setError('Login functionality requires @dfinity packages');
     } catch (error) {
       console.error('Login failed:', error);
+      setError('Login failed: ' + error.message);
     }
+    setLoading(false);
   };
 
-  // Logout
   const logout = async () => {
-    if (!authClient) return;
-
     try {
-      await authClient.logout();
+      setLoading(true);
+      
+      // TODO: Uncomment when packages are installed
+       if (authClient) {
+         await authClient.logout();
+       }
+      
       setIsAuthenticated(false);
       setPrincipal(null);
       setActor(null);
       setNotes([]);
+      setBalance(0);
+      setError('');
+      
+      console.log('Logged out');
     } catch (error) {
       console.error('Logout failed:', error);
+      setError('Logout failed: ' + error.message);
     }
+    setLoading(false);
   };
 
-  // Add new note
-  const addNote = async () => {
-    if (!actor || !formData.title.trim()) return;
-
-    try {
-      const id = Date.now();
-      const note = { title: formData.title, content: formData.content };
-      await actor.add_note(BigInt(id), note);
-      await loadNotes();
-      setFormData({ title: '', content: '' });
-      setShowAddForm(false);
-    } catch (error) {
-      console.error('Failed to add note:', error);
-    }
-  };
-
-  // Update existing note
-  const updateNote = async () => {
-    if (!actor || !editingNote || !formData.title.trim()) return;
-
-    try {
-      const note = { title: formData.title, content: formData.content };
-      await actor.update_note(BigInt(editingNote.id), note);
-      await loadNotes();
-      setFormData({ title: '', content: '' });
-      setEditingNote(null);
-    } catch (error) {
-      console.error('Failed to update note:', error);
-    }
-  };
-
-  // Delete note
-  const deleteNote = async (id) => {
+  const loadNotes = async () => {
     if (!actor) return;
-
+    
+    setLoading(true);
     try {
-      const result = await actor.delete_note(BigInt(id));
-      if ('Ok' in result) {
-        await loadNotes();
+      const notesList = await actor.list_notes();
+      setNotes(notesList.map(([id, note]) => ({ 
+        id: Number(id), 
+        title: note.title, 
+        content: note.content 
+      })));
+    } catch (error) {
+      console.error('Error loading notes:', error);
+      setError('Error loading notes: ' + error.message);
+    }
+    setLoading(false);
+  };
+
+  const loadBalance = async () => {
+    if (!actor) return;
+    
+    try {
+      const userBalance = await actor.balance_of();
+      setBalance(Number(userBalance));
+    } catch (error) {
+      console.error('Error loading balance:', error);
+      setError('Error loading balance: ' + error.message);
+    }
+  };
+
+  const handleAddNote = async () => {
+    if (!actor || !newNote.title.trim() || !newNote.content.trim()) return;
+
+    setLoading(true);
+    setError('');
+    try {
+      const id = BigInt(Date.now());
+      const noteData = {
+        title: newNote.title,
+        content: newNote.content
+      };
+      
+      const result = await actor.add_note(id, noteData);
+      
+      if ('Err' in result) {
+        throw new Error(result.Err);
+      }
+      
+      setNotes(prev => [...prev, { id: Number(id), ...noteData }]);
+      setNewNote({ title: '', content: '' });
+      setShowAddForm(false);
+      await loadBalance();
+    } catch (error) {
+      console.error('Error adding note:', error);
+      setError('Error adding note: ' + error.message);
+    }
+    setLoading(false);
+  };
+
+  const handleUpdateNote = async () => {
+    if (!actor || !editingNote.title.trim() || !editingNote.content.trim()) return;
+
+    setLoading(true);
+    setError('');
+    try {
+      const noteData = {
+        title: editingNote.title,
+        content: editingNote.content
+      };
+      
+      const result = await actor.update_note(BigInt(editingNote.id), noteData);
+      
+      if (result && result.length > 0) {
+        setNotes(prev => prev.map(note => 
+          note.id === editingNote.id ? editingNote : note
+        ));
+        setEditingNote(null);
       } else {
-        console.error('Delete failed:', result.Err);
+        throw new Error('Failed to update note');
       }
     } catch (error) {
-      console.error('Failed to delete note:', error);
+      console.error('Error updating note:', error);
+      setError('Error updating note: ' + error.message);
     }
+    setLoading(false);
   };
 
-  // Start editing a note
-  const startEditing = (note) => {
-    setEditingNote(note);
-    setFormData({ title: note.title, content: note.content });
-    setShowAddForm(false);
+  const handleDeleteNote = async (id) => {
+    if (!actor || !confirm('Are you sure you want to delete this note?')) return;
+
+    setLoading(true);
+    setError('');
+    try {
+      const result = await actor.delete_note(BigInt(id));
+      
+      if ('Err' in result) {
+        throw new Error(result.Err);
+      }
+      
+      setNotes(prev => prev.filter(note => note.id !== id));
+    } catch (error) {
+      console.error('Error deleting note:', error);
+      setError('Error deleting note: ' + error.message);
+    }
+    setLoading(false);
   };
 
-  // Cancel editing/adding
-  const cancelForm = () => {
-    setFormData({ title: '', content: '' });
-    setShowAddForm(false);
-    setEditingNote(null);
+  const refreshData = () => {
+    loadNotes();
+    loadBalance();
   };
 
-  if (loading) {
-    return (
-      <div className="loading-container">
-        <div className="loading-spinner"></div>
-        <p>Loading...</p>
-      </div>
-    );
-  }
-
+  // Login screen
   if (!isAuthenticated) {
     return (
-      <div className="login-container">
-        <div className="login-card">
-          <h1>IC Notes App</h1>
-          <p>Secure note-taking powered by Internet Computer</p>
-          <button onClick={login} className="login-btn">
-            <User size={20} />
-            Login with Internet Identity
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md w-full text-center">
+          <h1 className="text-3xl font-bold text-gray-900 mb-6">IC Notes</h1>
+          <p className="text-gray-600 mb-8">
+            A decentralized notes application on the Internet Computer
+          </p>
+          
+          {error && (
+            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+              <p className="text-red-800 text-sm">{error}</p>
+            </div>
+          )}
+          
+          <button
+            onClick={login}
+            disabled={loading}
+            className="flex items-center justify-center space-x-2 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 w-full"
+          >
+            <LogIn className="w-5 h-5" />
+            <span>{loading ? 'Connecting...' : 'Login with Internet Identity'}</span>
           </button>
+          
+          <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+            <h3 className="font-semibold text-yellow-800 mb-2">Setup Required:</h3>
+            <div className="text-sm text-yellow-700 text-left space-y-1">
+              <p>1. Install dependencies:</p>
+              <code className="block bg-yellow-100 p-2 rounded text-xs">
+                npm install @dfinity/agent @dfinity/auth-client @dfinity/principal @dfinity/candid
+              </code>
+              <p>2. Replace CANISTER_ID with your actual canister ID</p>
+              <p>3. Uncomment the import statements and auth code</p>
+            </div>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div className="app-container">
-      <header className="app-header">
-        <div className="header-content">
-          <h1>My Notes</h1>
-          <div className="header-actions">
-            <span className="principal-text">
-              {principal?.toString().slice(0, 8)}...
-            </span>
-            <button onClick={logout} className="logout-btn">
-              <LogOut size={18} />
-              Logout
-            </button>
+    <div className="min-h-screen bg-gray-50 p-4">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+          <div className="flex justify-between items-center">
+            <div>
+              <h1 className="text-3xl font-bold text-gray-900">IC Notes</h1>
+              <p className="text-sm text-gray-600">Principal: {principal}</p>
+            </div>
+            <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-2 bg-green-50 px-3 py-2 rounded-lg">
+                <Wallet className="w-5 h-5 text-green-600" />
+                <span className="font-semibold text-green-800">{balance} tokens</span>
+              </div>
+              <button
+                onClick={refreshData}
+                disabled={loading}
+                className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
+              </button>
+              <button
+                onClick={logout}
+                className="flex items-center space-x-2 text-gray-600 hover:text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                <span>Logout</span>
+              </button>
+            </div>
           </div>
         </div>
-      </header>
 
-      <main className="main-content">
-        <div className="add-note-section">
-          {!showAddForm && !editingNote && (
-            <button 
-              onClick={() => setShowAddForm(true)} 
-              className="add-note-btn"
-            >
-              <Plus size={20} />
-              Add New Note
-            </button>
+        {/* Error Display */}
+        {error && (
+          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <p className="text-red-800">{error}</p>
+          </div>
+        )}
+
+        {/* Add Note Button */}
+        <div className="mb-6">
+          <button
+            onClick={() => setShowAddForm(true)}
+            disabled={loading || balance < 10}
+            className="flex items-center space-x-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+          >
+            <Plus className="w-5 h-5" />
+            <span>Add New Note (10 tokens)</span>
+          </button>
+          {balance < 10 && (
+            <p className="text-red-600 text-sm mt-2">Insufficient balance to add notes</p>
           )}
         </div>
 
-        {(showAddForm || editingNote) && (
-          <div className="note-form">
-            <h3>{editingNote ? 'Edit Note' : 'Add New Note'}</h3>
-            <input
-              type="text"
-              placeholder="Note title..."
-              value={formData.title}
-              onChange={(e) => setFormData(prev => ({ ...prev, title: e.target.value }))}
-              className="form-input"
-            />
-            <textarea
-              placeholder="Write your note content here..."
-              value={formData.content}
-              onChange={(e) => setFormData(prev => ({ ...prev, content: e.target.value }))}
-              className="form-textarea"
-              rows={6}
-            />
-            <div className="form-actions">
-              <button 
-                onClick={editingNote ? updateNote : addNote}
-                className="save-btn"
-                disabled={!formData.title.trim()}
-              >
-                <Save size={18} />
-                {editingNote ? 'Update Note' : 'Save Note'}
-              </button>
-              <button onClick={cancelForm} className="cancel-btn">
-                <X size={18} />
-                Cancel
-              </button>
+        {/* Add Note Form */}
+        {showAddForm && (
+          <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+            <h2 className="text-xl font-semibold mb-4">Add New Note</h2>
+            <div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  value={newNote.title}
+                  onChange={(e) => setNewNote(prev => ({ ...prev, title: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter note title"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Content
+                </label>
+                <textarea
+                  value={newNote.content}
+                  onChange={(e) => setNewNote(prev => ({ ...prev, content: e.target.value }))}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter note content"
+                />
+              </div>
+              <div className="flex space-x-3">
+                <button
+                  type="button"
+                  onClick={handleAddNote}
+                  disabled={loading || !newNote.title.trim() || !newNote.content.trim()}
+                  className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  {loading ? 'Adding...' : 'Add Note'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowAddForm(false);
+                    setNewNote({ title: '', content: '' });
+                  }}
+                  className="bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
         )}
 
-        <div className="notes-grid">
-          {notes.length === 0 ? (
-            <div className="empty-state">
-              <p>No notes yet. Create your first note!</p>
+        {/* Edit Note Form */}
+        {editingNote && (
+          <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
+            <h2 className="text-xl font-semibold mb-4">Edit Note</h2>
+            <div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Title
+                </label>
+                <input
+                  type="text"
+                  value={editingNote.title}
+                  onChange={(e) => setEditingNote(prev => ({ ...prev, title: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div className="mb-4">
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Content
+                </label>
+                <textarea
+                  value={editingNote.content}
+                  onChange={(e) => setEditingNote(prev => ({ ...prev, content: e.target.value }))}
+                  rows={4}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+              <div className="flex space-x-3">
+                <button
+                  type="button"
+                  onClick={handleUpdateNote}
+                  disabled={loading || !editingNote.title.trim() || !editingNote.content.trim()}
+                  className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
+                >
+                  {loading ? 'Updating...' : 'Update Note'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingNote(null)}
+                  className="bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400 transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Notes List */}
+        <div className="space-y-4">
+          {loading && notes.length === 0 ? (
+            <div className="text-center py-8">
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
+              <p className="text-gray-600 mt-2">Loading notes...</p>
+            </div>
+          ) : notes.length === 0 ? (
+            <div className="text-center py-12 bg-white rounded-lg shadow-sm">
+              <p className="text-gray-600 text-lg">No notes yet</p>
+              <p className="text-gray-500">Create your first note to get started!</p>
             </div>
           ) : (
             notes.map((note) => (
-              <div key={note.id} className="note-card">
-                <div className="note-header">
-                  <h3 className="note-title">{note.title}</h3>
-                  <div className="note-actions">
-                    <button 
-                      onClick={() => startEditing(note)}
-                      className="edit-btn"
-                      title="Edit note"
+              <div key={note.id} className="bg-white rounded-lg shadow-sm p-6">
+                <div className="flex justify-between items-start mb-3">
+                  <h3 className="text-xl font-semibold text-gray-900">{note.title}</h3>
+                  <div className="flex space-x-2">
+                    <button
+                      onClick={() => setEditingNote(note)}
+                      disabled={loading}
+                      className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
                     >
-                      <Edit size={16} />
+                      <Edit2 className="w-4 h-4" />
                     </button>
-                    <button 
-                      onClick={() => deleteNote(note.id)}
-                      className="delete-btn"
-                      title="Delete note"
+                    <button
+                      onClick={() => handleDeleteNote(note.id)}
+                      disabled={loading}
+                      className="p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
                     >
-                      <Trash2 size={16} />
+                      <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
                 </div>
-                <div className="note-content">
-                  {note.content || 'No content'}
-                </div>
+                <p className="text-gray-700 whitespace-pre-wrap">{note.content}</p>
               </div>
             ))
           )}
         </div>
-      </main>
+      </div>
     </div>
   );
 };
