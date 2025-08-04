@@ -79,8 +79,8 @@ struct Account {
 struct TransferArg {
     from_subaccount: Option<Vec<u8>>,
     to: Account,
-    amount: Nat,                // ✅ لازم Nat
-    fee: Option<Nat>,          // ✅ لازم Nat
+    amount: Nat,               
+    fee: Option<Nat>,          
     memo: Option<Vec<u8>>,
     created_at_time: Option<u64>,
 }
