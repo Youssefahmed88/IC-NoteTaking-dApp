@@ -1,514 +1,619 @@
 import React, { useState, useEffect } from 'react';
-import { Plus, Edit2, Trash2, Wallet, RefreshCw, LogIn, LogOut } from 'lucide-react';
 
-// IC Agent imports - install these packages:
-// npm install @dfinity/agent @dfinity/auth-client @dfinity/principal @dfinity/candid
+// Helper to handle BigInt serialization for JSON.stringify
+function jsonStringifyWithBigInt(obj) {
+  return JSON.stringify(obj, (key, value) => (typeof value === "bigint" ? value.toString() : value));
+}
 
-// Uncomment these imports when you install the packages:
-import { Actor, HttpAgent } from '@dfinity/agent';
-import { AuthClient } from '@dfinity/auth-client';
-import { Principal } from '@dfinity/principal';
-
-const NotesApp = () => {
+function App() {
   const [notes, setNotes] = useState([]);
-  const [balance, setBalance] = useState(0);
-  const [showAddForm, setShowAddForm] = useState(false);
+  const [newNote, setNewNote] = useState({ title: "", content: "" });
   const [editingNote, setEditingNote] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [newNote, setNewNote] = useState({ title: '', content: '' });
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
-  const [principal, setPrincipal] = useState(null);
-  const [actor, setActor] = useState(null);
-  const [authClient, setAuthClient] = useState(null);
-  const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+  const [isConnected, setIsConnected] = useState(false);
+  const [showAddNote, setShowAddNote] = useState(false);
+  const [approvalAmount, setApprovalAmount] = useState(100000);
+  const [showApprovalForm, setShowApprovalForm] = useState(false);
+  const [getNoteIdInput, setGetNoteIdInput] = useState('');
+  const [fetchedNote, setFetchedNote] = useState(null);
+  const [showGetNoteSection, setShowGetNoteSection] = useState(false); // To toggle Get by ID section
 
-  // Replace with your actual canister ID
-  const CANISTER_ID = 'uxrrr-q7777-77774-qaaaq-cai';
-  
-  // Internet Identity URL
-  const II_URL = process.env.NODE_ENV === 'production' 
-    ? 'https://identity.ic0.app'
-    : 'http://localhost:4943/?canisterId=rdmx6-jaaaa-aaaaa-aaadq-cai';
+  // Canister IDs based on your dfx deploy output:
+  const BACKEND_CANISTER_ID = "uxrrr-q7777-77774-qaaaq-cai"; // This is NoteTakingdApp_backend
+  const LEDGER_CANISTER_ID = "umunu-kh777-77774-qaaca-cai"; // This is icrc1_ledger_canister
+  const HOST = "http://127.0.0.1:4943"; // Default local dfx host
 
-  // IDL Factory for your canister - matches your Rust backend
-  const idlFactory = ({ IDL }) => {
-    const Note = IDL.Record({ 
-      'title': IDL.Text, 
-      'content': IDL.Text 
-    });
-    
-    const Result = IDL.Variant({ 'Ok': Note, 'Err': IDL.Text });
-    const Result_1 = IDL.Variant({ 'Ok': IDL.Text, 'Err': IDL.Text });
-    const Result_2 = IDL.Variant({ 'Ok': IDL.Null, 'Err': IDL.Text });
-    
-    return IDL.Service({
-      'add_note': IDL.Func([IDL.Nat64, Note], [Result], []),
-      'update_note': IDL.Func([IDL.Nat64, Note], [IDL.Opt(Note)], []),
-      'get_note': IDL.Func([IDL.Nat64], [IDL.Opt(Note)], ['query']),
-      'list_notes': IDL.Func([], [IDL.Vec(IDL.Tuple(IDL.Nat64, Note))], ['query']),
-      'delete_note': IDL.Func([IDL.Nat64], [Result_1], []),
-      'balance_of': IDL.Func([], [IDL.Nat64], ['query']),
-      'mint': IDL.Func([IDL.Principal, IDL.Nat64], [Result_2], []),
-    });
+  // Basic IC API call function (simplified, as discussed)
+  const makeICCall = async (canisterId, method, args = [], isQuery = false) => {
+    try {
+      const callType = isQuery ? "query" : "call";
+      const url = `${HOST}/api/v2/canister/${canisterId}/${callType}`;
+
+      const requestBody = {
+        request_type: callType,
+        canister_id: canisterId,
+        method_name: method,
+        arg: args,
+        sender: null, // Anonymous identity for simplicity
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/cbor', // Still technically incorrect for JSON body
+        },
+        body: jsonStringifyWithBigInt(requestBody),
+      });
+
+      if (!response.ok) {
+        throw new Error(`IC call failed: ${response.status} ${response.statusText}`);
+      }
+      const result = await response.json();
+
+      if (result.status === 'replied') {
+        return result.reply;
+      } else if (result.status === 'rejected') {
+        throw new Error(`Canister rejected: ${result.reject_message}`);
+      } else {
+        throw new Error(`Unexpected response status: ${result.status}`);
+      }
+    } catch (error) {
+      console.error(`Error calling ${method}:`, error);
+      setError(`Error calling ${method}: ${error.message}`);
+      throw error;
+    }
   };
 
-  // Initialize authentication on component mount
   useEffect(() => {
-    initAuth();
+    initConnection();
   }, []);
 
-  const initAuth = async () => {
+  const initConnection = async () => {
+    setIsLoading(true);
+    clearMessages();
     try {
-      // TODO: Uncomment when packages are installed
-       const authClient = await AuthClient.create();
-       setAuthClient(authClient);
-      
-       if (await authClient.isAuthenticated()) {
-         await handleAuthenticated(authClient);
-       }
-      
-      console.log('Auth client would be initialized here');
-      setError('Please install @dfinity packages and uncomment the auth code');
-    } catch (error) {
-      console.error('Auth initialization failed:', error);
-      setError('Auth initialization failed: ' + error.message);
+      await fetchNotes();
+      setIsConnected(true);
+      setSuccess("Connected to Internet Computer successfully!");
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (err) {
+      console.error("Failed to connect:", err);
+      setError("Failed to connect to IC canisters. Make sure dfx is running and canisters are deployed.");
+      setIsConnected(false);
     }
+    setIsLoading(false);
   };
 
-  const handleAuthenticated = async (authClient) => {
+  const fetchNotes = async () => {
+    if (!isConnected && !isLoading) return;
+    setIsLoading(true);
+    clearMessages();
     try {
-      // TODO: Uncomment when packages are installed
-      const identity = authClient.getIdentity();
-      const agent = new HttpAgent({ identity });
-      
-      // // Fetch root key for local development
-      if (process.env.NODE_ENV !== 'production') {
-        await agent.fetchRootKey();
+      const result = await makeICCall(BACKEND_CANISTER_ID, 'list_notes', [], true);
+      if (Array.isArray(result)) {
+        setNotes(result.map(([id, note]) => ({
+          id: Number(id),
+          title: note.title,
+          content: note.content
+        })));
+      } else {
+        setNotes([]);
       }
-      
-      const actor = Actor.createActor(idlFactory, {
-      agent,
-         canisterId: CANISTER_ID,
-       });
-      
-       setActor(actor);
-       setPrincipal(identity.getPrincipal().toString());
-       setIsAuthenticated(true);
-      
-       await loadNotes();
-       await loadBalance();
-      
-      console.log('Would create actor and authenticate here');
     } catch (error) {
-      console.error('Authentication failed:', error);
-      setError('Authentication failed: ' + error.message);
+      console.error("Error fetching notes:", error);
+      setError("Failed to load notes: " + error.message);
+      setIsConnected(false);
+    }
+    setIsLoading(false);
+  };
+
+  const getNote = async (noteId) => {
+    if (!isConnected) {
+      throw new Error("Not connected to IC");
+    }
+    try {
+      const result = await makeICCall(BACKEND_CANISTER_ID, "get_note", [noteId], true);
+      return result && Array.isArray(result) && result.length > 0 ? result[0] : null;
+    } catch (error) {
+      console.error("Error getting note:", error);
+      throw error;
     }
   };
 
-  const login = async () => {
-    if (!authClient) {
-      setError('Auth client not initialized');
+  const addNote = async () => {
+    if (!isConnected) {
+      setError("Not connected to IC. Please check your connection.");
       return;
     }
-    
-    try {
-      setLoading(true);
-      setError('');
-      
-      // TODO: Uncomment when packages are installed
-       await authClient.login({
-         identityProvider: II_URL,
-         onSuccess: () => handleAuthenticated(authClient),
-         onError: (error) => {
-           console.error('Login error:', error);
-           setError('Login failed: ' + error);
-         }
-       });
-      
-      console.log('Would login with Internet Identity here');
-      setError('Login functionality requires @dfinity packages');
-    } catch (error) {
-      console.error('Login failed:', error);
-      setError('Login failed: ' + error.message);
+    if (!newNote.title.trim() || !newNote.content.trim()) {
+      setError("Please enter both title and content.");
+      return;
     }
-    setLoading(false);
-  };
 
-  const logout = async () => {
+    setIsLoading(true);
+    clearMessages();
     try {
-      setLoading(true);
-      
-      // TODO: Uncomment when packages are installed
-       if (authClient) {
-         await authClient.logout();
-       }
-      
-      setIsAuthenticated(false);
-      setPrincipal(null);
-      setActor(null);
-      setNotes([]);
-      setBalance(0);
-      setError('');
-      
-      console.log('Logged out');
-    } catch (error) {
-      console.error('Logout failed:', error);
-      setError('Logout failed: ' + error.message);
-    }
-    setLoading(false);
-  };
+      const noteId = Date.now(); // Simple ID generation
+      const noteData = { title: newNote.title.trim(), content: newNote.content.trim() };
+      const result = await makeICCall(BACKEND_CANISTER_ID, "add_note", [noteId, noteData]);
 
-  const loadNotes = async () => {
-    if (!actor) return;
-    
-    setLoading(true);
-    try {
-      const notesList = await actor.list_notes();
-      setNotes(notesList.map(([id, note]) => ({ 
-        id: Number(id), 
-        title: note.title, 
-        content: note.content 
-      })));
-    } catch (error) {
-      console.error('Error loading notes:', error);
-      setError('Error loading notes: ' + error.message);
-    }
-    setLoading(false);
-  };
-
-  const loadBalance = async () => {
-    if (!actor) return;
-    
-    try {
-      const userBalance = await actor.balance_of();
-      setBalance(Number(userBalance));
-    } catch (error) {
-      console.error('Error loading balance:', error);
-      setError('Error loading balance: ' + error.message);
-    }
-  };
-
-  const handleAddNote = async () => {
-    if (!actor || !newNote.title.trim() || !newNote.content.trim()) return;
-
-    setLoading(true);
-    setError('');
-    try {
-      const id = BigInt(Date.now());
-      const noteData = {
-        title: newNote.title,
-        content: newNote.content
-      };
-      
-      const result = await actor.add_note(id, noteData);
-      
-      if ('Err' in result) {
-        throw new Error(result.Err);
-      }
-      
-      setNotes(prev => [...prev, { id: Number(id), ...noteData }]);
-      setNewNote({ title: '', content: '' });
-      setShowAddForm(false);
-      await loadBalance();
-    } catch (error) {
-      console.error('Error adding note:', error);
-      setError('Error adding note: ' + error.message);
-    }
-    setLoading(false);
-  };
-
-  const handleUpdateNote = async () => {
-    if (!actor || !editingNote.title.trim() || !editingNote.content.trim()) return;
-
-    setLoading(true);
-    setError('');
-    try {
-      const noteData = {
-        title: editingNote.title,
-        content: editingNote.content
-      };
-      
-      const result = await actor.update_note(BigInt(editingNote.id), noteData);
-      
-      if (result && result.length > 0) {
-        setNotes(prev => prev.map(note => 
-          note.id === editingNote.id ? editingNote : note
-        ));
-        setEditingNote(null);
+      if (result && (result.Ok || result.success)) {
+        const responseNote = result.Ok || noteData;
+        setNotes((prev) => [
+          ...prev,
+          { id: noteId, title: responseNote.title, content: responseNote.content },
+        ]);
+        setNewNote({ title: "", content: "" });
+        setShowAddNote(false);
+        setSuccess("Note added successfully!");
+        setTimeout(() => setSuccess(""), 3000);
       } else {
-        throw new Error('Failed to update note');
+        throw new Error(result.Err ? Object.keys(result.Err)[0] : result.error || "Failed to add note");
       }
     } catch (error) {
-      console.error('Error updating note:', error);
-      setError('Error updating note: ' + error.message);
+      console.error("Error adding note:", error);
+      setError("Failed to add note: " + error.message);
     }
-    setLoading(false);
+    setIsLoading(false);
   };
 
-  const handleDeleteNote = async (id) => {
-    if (!actor || !confirm('Are you sure you want to delete this note?')) return;
+  const updateNote = async () => {
+    if (!isConnected) {
+      setError("Not connected to IC. Please check your connection.");
+      return;
+    }
+    if (!editingNote || !editingNote.title.trim() || !editingNote.content.trim()) {
+      setError("Please enter both title and content.");
+      return;
+    }
 
-    setLoading(true);
-    setError('');
+    setIsLoading(true);
+    clearMessages();
     try {
-      const result = await actor.delete_note(BigInt(id));
-      
-      if ('Err' in result) {
-        throw new Error(result.Err);
+      const noteData = { title: editingNote.title.trim(), content: editingNote.content.trim() };
+      const result = await makeICCall(BACKEND_CANISTER_ID, "update_note", [editingNote.id, noteData]);
+
+      if (result && (result.Ok || result.success)) {
+        const responseNote = result.Ok || noteData;
+        setNotes((prev) =>
+          prev.map((note) =>
+            note.id === editingNote.id
+              ? { id: editingNote.id, title: responseNote.title, content: responseNote.content }
+              : note,
+          ),
+        );
+        setEditingNote(null);
+        setSuccess("Note updated successfully!");
+        setTimeout(() => setSuccess(""), 3000);
+      } else {
+        throw new Error(result.Err ? Object.keys(result.Err)[0] : result.error || "Failed to update note");
       }
-      
-      setNotes(prev => prev.filter(note => note.id !== id));
     } catch (error) {
-      console.error('Error deleting note:', error);
-      setError('Error deleting note: ' + error.message);
+      console.error("Error updating note:", error);
+      setError("Failed to update note: " + error.message);
     }
-    setLoading(false);
+    setIsLoading(false);
   };
 
-  const refreshData = () => {
-    loadNotes();
-    loadBalance();
+  const deleteNote = async (noteId) => {
+    if (!isConnected) {
+      setError("Not connected to IC. Please check your connection.");
+      return;
+    }
+    if (!window.confirm('Are you sure you want to delete this note?')) {
+      return;
+    }
+    setIsLoading(true);
+    clearMessages();
+    try {
+      const result = await makeICCall(BACKEND_CANISTER_ID, "delete_note", [noteId]);
+
+      if (result && (result.Ok || result.success)) {
+        setNotes((prev) => prev.filter((note) => note.id !== noteId));
+        setSuccess("Note deleted successfully!");
+        setTimeout(() => setSuccess(""), 3000);
+      } else {
+        throw new Error(result.Err ? Object.keys(result.Err)[0] : result.error || "Failed to delete note");
+      }
+    } catch (error) {
+      console.error("Error deleting note:", error);
+      setError("Failed to delete note: " + error.message);
+    }
+    setIsLoading(false);
   };
 
-  // Login screen
-  if (!isAuthenticated) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">
-        <div className="bg-white rounded-lg shadow-lg p-8 max-w-md w-full text-center">
-          <h1 className="text-3xl font-bold text-gray-900 mb-6">IC Notes</h1>
-          <p className="text-gray-600 mb-8">
-            A decentralized notes application on the Internet Computer
-          </p>
-          
-          {error && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-              <p className="text-red-800 text-sm">{error}</p>
-            </div>
-          )}
-          
-          <button
-            onClick={login}
-            disabled={loading}
-            className="flex items-center justify-center space-x-2 bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 w-full"
-          >
-            <LogIn className="w-5 h-5" />
-            <span>{loading ? 'Connecting...' : 'Login with Internet Identity'}</span>
-          </button>
-          
-          <div className="mt-6 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
-            <h3 className="font-semibold text-yellow-800 mb-2">Setup Required:</h3>
-            <div className="text-sm text-yellow-700 text-left space-y-1">
-              <p>1. Install dependencies:</p>
-              <code className="block bg-yellow-100 p-2 rounded text-xs">
-                npm install @dfinity/agent @dfinity/auth-client @dfinity/principal @dfinity/candid
-              </code>
-              <p>2. Replace CANISTER_ID with your actual canister ID</p>
-              <p>3. Uncomment the import statements and auth code</p>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const approveTokens = async () => {
+    if (!isConnected) {
+      setError("Not connected to IC. Please check your connection.");
+      return;
+    }
+    setIsLoading(true);
+    clearMessages();
+    try {
+      const approveArgs = {
+        spender: { owner: BACKEND_CANISTER_ID, subaccount: [] },
+        amount: BigInt(approvalAmount),
+        expected_allowance: [], expires_at: [], fee: [], memo: [], created_at_time: [],
+      };
+      const result = await makeICCall(LEDGER_CANISTER_ID, "icrc2_approve", [approveArgs]);
+
+      if (result && result.Ok !== undefined) {
+        const blockIndex = result.Ok;
+        setSuccess(`Tokens approved successfully! Block index: ${blockIndex}`);
+        setShowApprovalForm(false);
+        setTimeout(() => setSuccess(""), 5000);
+      } else {
+        const errorMsg = result.Err ? Object.keys(result.Err)[0] : "Unknown error";
+        throw new Error(errorMsg);
+      }
+    } catch (error) {
+      console.error("Error approving tokens:", error);
+      setError("Failed to approve tokens: " + error.message);
+    }
+    setIsLoading(false);
+  };
+
+  const startEditing = (note) => {
+    setEditingNote({ ...note });
+    setShowAddNote(false);
+    setShowApprovalForm(false);
+    setShowGetNoteSection(false);
+  };
+
+  const cancelEditing = () => {
+    setEditingNote(null);
+  };
+
+  const clearMessages = () => {
+    setError("");
+    setSuccess("");
+  };
+
+  const handleGetNoteById = async () => {
+    const noteId = Number(getNoteIdInput);
+    if (isNaN(noteId)) {
+      setError("Invalid note ID. Please enter a number.");
+      setFetchedNote(null);
+      return;
+    }
+    if (!isConnected) {
+      setError("Not connected to IC");
+      return;
+    }
+    try {
+      setIsLoading(true);
+      clearMessages();
+      const note = await getNote(noteId);
+      if (note) {
+        setFetchedNote({ id: noteId, title: note.title, content: note.content });
+        setSuccess(`Note ID ${noteId} fetched successfully.`);
+      } else {
+        setError("Note not found!");
+        setFetchedNote(null);
+      }
+    } catch (error) {
+      setError("Error getting note: " + error.message);
+      setFetchedNote(null);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50 p-4">
-      <div className="max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-          <div className="flex justify-between items-center">
-            <div>
-              <h1 className="text-3xl font-bold text-gray-900">IC Notes</h1>
-              <p className="text-sm text-gray-600">Principal: {principal}</p>
-            </div>
-            <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2 bg-green-50 px-3 py-2 rounded-lg">
-                <Wallet className="w-5 h-5 text-green-600" />
-                <span className="font-semibold text-green-800">{balance} tokens</span>
-              </div>
-              <button
-                onClick={refreshData}
-                disabled={loading}
-                className="p-2 text-gray-600 hover:text-gray-900 hover:bg-gray-100 rounded-lg transition-colors"
-              >
-                <RefreshCw className={`w-5 h-5 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-              <button
-                onClick={logout}
-                className="flex items-center space-x-2 text-gray-600 hover:text-red-600 hover:bg-red-50 px-3 py-2 rounded-lg transition-colors"
-              >
-                <LogOut className="w-4 h-4" />
-                <span>Logout</span>
-              </button>
-            </div>
-          </div>
+    <div style={{ maxWidth: '800px', margin: '20px auto', padding: '20px', fontFamily: 'sans-serif', border: '1px solid #eee', borderRadius: '8px', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }}>
+      <h1 style={{ textAlign: 'center', color: '#333', marginBottom: '20px' }}>Internet Computer Notes DApp</h1>
+
+      {/* Connection Status */}
+      <div style={{ padding: '10px', marginBottom: '15px', borderRadius: '5px', border: `1px solid ${isConnected ? '#a8e6cf' : '#ffcccb'}`, backgroundColor: isConnected ? '#e6ffe6' : '#fff0f0', color: isConnected ? '#28a745' : '#dc3545' }}>
+        <h3 style={{ margin: '0', fontSize: '1.1em' }}>Connection Status</h3>
+        <p style={{ margin: '5px 0 0' }}>{isConnected ? "🟢 Connected to Internet Computer" : "🔴 Not Connected to IC - Check your dfx setup"}</p>
+      </div>
+
+      {/* Status Messages */}
+      {error && (
+        <div style={{ padding: '10px', marginBottom: '15px', borderRadius: '5px', border: '1px solid #dc3545', backgroundColor: '#fff0f0', color: '#dc3545' }}>
+          <strong>Error:</strong> {error}
+          <button onClick={clearMessages} style={{ float: 'right', background: 'none', border: 'none', cursor: 'pointer', color: '#dc3545' }}>X</button>
         </div>
+      )}
+      {success && (
+        <div style={{ padding: '10px', marginBottom: '15px', borderRadius: '5px', border: '1px solid #28a745', backgroundColor: '#e6ffe6', color: '#28a745' }}>
+          <strong>Success:</strong> {success}
+          <button onClick={clearMessages} style={{ float: 'right', background: 'none', border: 'none', cursor: 'pointer', color: '#28a745' }}>X</button>
+        </div>
+      )}
 
-        {/* Error Display */}
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-            <p className="text-red-800">{error}</p>
-          </div>
-        )}
-
-        {/* Add Note Button */}
-        <div className="mb-6">
+      {/* Action Buttons */}
+      {!showAddNote && !editingNote && !showApprovalForm && !showGetNoteSection && (
+        <div style={{ marginBottom: '20px', display: 'flex', flexWrap: 'wrap', gap: '10px' }}>
           <button
-            onClick={() => setShowAddForm(true)}
-            disabled={loading || balance < 10}
-            className="flex items-center space-x-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400 disabled:cursor-not-allowed"
+            onClick={() => setShowAddNote(true)}
+            disabled={isLoading || !isConnected}
+            style={{ padding: '10px 15px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
           >
-            <Plus className="w-5 h-5" />
-            <span>Add New Note (10 tokens)</span>
+            Add New Note
           </button>
-          {balance < 10 && (
-            <p className="text-red-600 text-sm mt-2">Insufficient balance to add notes</p>
+          <button
+            onClick={() => setShowApprovalForm(true)}
+            disabled={isLoading || !isConnected}
+            style={{ padding: '10px 15px', backgroundColor: '#ffc107', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+          >
+            Approve Tokens
+          </button>
+          <button
+            onClick={() => setShowGetNoteSection(true)}
+            disabled={isLoading || !isConnected}
+            style={{ padding: '10px 15px', backgroundColor: '#6f42c1', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+          >
+            Get Note by ID
+          </button>
+          <button
+            onClick={initConnection}
+            disabled={isLoading}
+            style={{ padding: '10px 15px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: isLoading ? 0.6 : 1 }}
+          >
+            {isLoading ? "Connecting..." : "Reconnect to IC"}
+          </button>
+        </div>
+      )}
+
+      {/* Approve Tokens Form */}
+      {showApprovalForm && !editingNote && !showAddNote && !showGetNoteSection && (
+        <div style={{ border: '1px solid #ffc107', padding: '15px', marginBottom: '20px', borderRadius: '8px', backgroundColor: '#fffbe6' }}>
+          <h2 style={{ marginTop: '0', color: '#333' }}>Approve Tokens</h2>
+          <p style={{ color: '#555' }}>Approve tokens to allow the backend canister to spend on your behalf for note operations.</p>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="approval-amount" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Amount to Approve:</label>
+            <input
+              id="approval-amount"
+              type="number"
+              value={approvalAmount}
+              onChange={(e) => setApprovalAmount(Number(e.target.value))}
+              placeholder="Enter amount (e.g., 100000)"
+              disabled={isLoading}
+              min="10000"
+              step="10000"
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+            <small style={{ color: '#666', display: 'block', marginTop: '5px' }}>Recommended: 100,000 tokens (allows 10 operations at 10,000 tokens each)</small>
+          </div>
+          <div style={{ padding: '10px', border: '1px solid #ddd', backgroundColor: '#f8f9fa', borderRadius: '5px', marginBottom: '15px' }}>
+            <h4 style={{ margin: '0', fontSize: '1em' }}>Approval Details:</h4>
+            <p style={{ margin: '5px 0 0' }}>• Spender: {BACKEND_CANISTER_ID}</p>
+            <p style={{ margin: '0' }}>• Ledger: {LEDGER_CANISTER_ID}</p>
+            <p style={{ margin: '0' }}>• This allows the backend to charge you for note operations</p>
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={approveTokens}
+              disabled={isLoading || !isConnected}
+              style={{ padding: '10px 15px', backgroundColor: '#ffc107', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+            >
+              {isLoading ? "Approving..." : "Approve Tokens"}
+            </button>
+            <button
+              onClick={() => setShowApprovalForm(false)}
+              disabled={isLoading}
+              style={{ padding: '10px 15px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: isLoading ? 0.6 : 1 }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Add New Note Form */}
+      {showAddNote && !editingNote && !showApprovalForm && !showGetNoteSection && (
+        <div style={{ border: '1px solid #007bff', padding: '15px', marginBottom: '20px', borderRadius: '8px', backgroundColor: '#e6f7ff' }}>
+          <h2 style={{ marginTop: '0', color: '#333' }}>Add New Note</h2>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="new-note-title" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Title:</label>
+            <input
+              id="new-note-title"
+              type="text"
+              value={newNote.title}
+              onChange={(e) => setNewNote({ ...newNote, title: e.target.value })}
+              placeholder="Enter note title"
+              disabled={isLoading}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+          </div>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="new-note-content" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Content:</label>
+            <textarea
+              id="new-note-content"
+              value={newNote.content}
+              onChange={(e) => setNewNote({ ...newNote, content: e.target.value })}
+              placeholder="Enter note content"
+              disabled={isLoading}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px', minHeight: '100px', resize: 'vertical' }}
+            ></textarea>
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={addNote}
+              disabled={isLoading || !isConnected || !newNote.title.trim() || !newNote.content.trim()}
+              style={{ padding: '10px 15px', backgroundColor: '#28a745', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected || !newNote.title.trim() || !newNote.content.trim()) ? 0.6 : 1 }}
+            >
+              {isLoading ? "Adding..." : "Add Note"}
+            </button>
+            <button
+              onClick={() => { setShowAddNote(false); setNewNote({ title: "", content: "" }); }}
+              disabled={isLoading}
+              style={{ padding: '10px 15px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: isLoading ? 0.6 : 1 }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Get Note by ID Section */}
+      {showGetNoteSection && !editingNote && !showAddNote && !showApprovalForm && (
+        <div style={{ border: '1px solid #6f42c1', padding: '15px', marginBottom: '20px', borderRadius: '8px', backgroundColor: '#f3e6ff' }}>
+          <h2 style={{ marginTop: '0', color: '#333' }}>Get Note by ID</h2>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="get-note-id" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Note ID:</label>
+            <input
+              id="get-note-id"
+              type="number"
+              value={getNoteIdInput}
+              onChange={(e) => setGetNoteIdInput(e.target.value)}
+              placeholder="Enter Note ID"
+              disabled={isLoading || !isConnected}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={handleGetNoteById}
+              disabled={isLoading || !isConnected || !getNoteIdInput.trim()}
+              style={{ padding: '10px 15px', backgroundColor: '#6f42c1', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected || !getNoteIdInput.trim()) ? 0.6 : 1 }}
+            >
+              {isLoading ? "Fetching..." : "Fetch Note"}
+            </button>
+            <button
+              onClick={() => { setShowGetNoteSection(false); setFetchedNote(null); setGetNoteIdInput(''); clearMessages(); }}
+              disabled={isLoading}
+              style={{ padding: '10px 15px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: isLoading ? 0.6 : 1 }}
+            >
+              Close
+            </button>
+          </div>
+          {fetchedNote && (
+            <div style={{ marginTop: '15px', padding: '10px', border: '1px dashed #999', borderRadius: '5px', backgroundColor: '#f0f0f0' }}>
+              <h4 style={{ margin: '0', fontSize: '1em' }}>Fetched Note: {fetchedNote.title} (ID: {fetchedNote.id})</h4>
+              <p style={{ margin: '5px 0 0', fontSize: '0.9em', color: '#555' }}>{fetchedNote.content}</p>
+            </div>
           )}
         </div>
+      )}
 
-        {/* Add Note Form */}
-        {showAddForm && (
-          <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Add New Note</h2>
-            <div>
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Title
-                </label>
-                <input
-                  type="text"
-                  value={newNote.title}
-                  onChange={(e) => setNewNote(prev => ({ ...prev, title: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Enter note title"
-                />
-              </div>
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Content
-                </label>
-                <textarea
-                  value={newNote.content}
-                  onChange={(e) => setNewNote(prev => ({ ...prev, content: e.target.value }))}
-                  rows={4}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                  placeholder="Enter note content"
-                />
-              </div>
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={handleAddNote}
-                  disabled={loading || !newNote.title.trim() || !newNote.content.trim()}
-                  className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
-                >
-                  {loading ? 'Adding...' : 'Add Note'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddForm(false);
-                    setNewNote({ title: '', content: '' });
-                  }}
-                  className="bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400 transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+      {/* Edit Note Form */}
+      {editingNote && (
+        <div style={{ border: '1px solid #ffc107', padding: '15px', marginBottom: '20px', borderRadius: '8px', backgroundColor: '#fffbe6' }}>
+          <h2 style={{ marginTop: '0', color: '#333' }}>Edit Note (ID: {editingNote.id})</h2>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="edit-note-title" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Title:</label>
+            <input
+              id="edit-note-title"
+              type="text"
+              value={editingNote.title}
+              onChange={(e) => setEditingNote({ ...editingNote, title: e.target.value })}
+              disabled={isLoading}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px' }}
+            />
           </div>
-        )}
-
-        {/* Edit Note Form */}
-        {editingNote && (
-          <div className="bg-white rounded-lg shadow-sm p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Edit Note</h2>
-            <div>
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Title
-                </label>
-                <input
-                  type="text"
-                  value={editingNote.title}
-                  onChange={(e) => setEditingNote(prev => ({ ...prev, title: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div className="mb-4">
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Content
-                </label>
-                <textarea
-                  value={editingNote.content}
-                  onChange={(e) => setEditingNote(prev => ({ ...prev, content: e.target.value }))}
-                  rows={4}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                />
-              </div>
-              <div className="flex space-x-3">
-                <button
-                  type="button"
-                  onClick={handleUpdateNote}
-                  disabled={loading || !editingNote.title.trim() || !editingNote.content.trim()}
-                  className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors disabled:bg-gray-400"
-                >
-                  {loading ? 'Updating...' : 'Update Note'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setEditingNote(null)}
-                  className="bg-gray-300 text-gray-700 px-4 py-2 rounded-lg hover:bg-gray-400 transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
+          <div style={{ marginBottom: '10px' }}>
+            <label htmlFor="edit-note-content" style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold' }}>Content:</label>
+            <textarea
+              id="edit-note-content"
+              value={editingNote.content}
+              onChange={(e) => setEditingNote({ ...editingNote, content: e.target.value })}
+              disabled={isLoading}
+              style={{ width: '100%', padding: '8px', border: '1px solid #ccc', borderRadius: '4px', minHeight: '100px', resize: 'vertical' }}
+            ></textarea>
           </div>
-        )}
+          <div style={{ display: 'flex', gap: '10px' }}>
+            <button
+              onClick={updateNote}
+              disabled={isLoading || !isConnected || !editingNote.title.trim() || !editingNote.content.trim()}
+              style={{ padding: '10px 15px', backgroundColor: '#ffc107', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected || !editingNote.title.trim() || !editingNote.content.trim()) ? 0.6 : 1 }}
+            >
+              {isLoading ? "Updating..." : "Update Note"}
+            </button>
+            <button
+              onClick={cancelEditing}
+              disabled={isLoading}
+              style={{ padding: '10px 15px', backgroundColor: '#6c757d', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: isLoading ? 0.6 : 1 }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
-        {/* Notes List */}
-        <div className="space-y-4">
-          {loading && notes.length === 0 ? (
-            <div className="text-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-              <p className="text-gray-600 mt-2">Loading notes...</p>
-            </div>
-          ) : notes.length === 0 ? (
-            <div className="text-center py-12 bg-white rounded-lg shadow-sm">
-              <p className="text-gray-600 text-lg">No notes yet</p>
-              <p className="text-gray-500">Create your first note to get started!</p>
-            </div>
-          ) : (
-            notes.map((note) => (
-              <div key={note.id} className="bg-white rounded-lg shadow-sm p-6">
-                <div className="flex justify-between items-start mb-3">
-                  <h3 className="text-xl font-semibold text-gray-900">{note.title}</h3>
-                  <div className="flex space-x-2">
-                    <button
-                      onClick={() => setEditingNote(note)}
-                      disabled={loading}
-                      className="p-2 text-gray-600 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Edit2 className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteNote(note.id)}
-                      disabled={loading}
-                      className="p-2 text-gray-600 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
+      {/* Notes List */}
+      <div style={{ marginBottom: '20px' }}>
+        <h2 style={{ display: 'inline-block', marginRight: '10px', color: '#333' }}>My Notes ({notes.length})</h2>
+        <button
+          onClick={fetchNotes}
+          disabled={isLoading || !isConnected}
+          style={{ padding: '8px 12px', backgroundColor: '#007bff', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+        >
+          {isLoading ? "Loading..." : "Refresh"}
+        </button>
+        <br />
+        {!isConnected ? (
+          <div style={{ padding: '15px', textAlign: 'center', border: '1px solid #dc3545', backgroundColor: '#fff0f0', color: '#dc3545', borderRadius: '8px' }}>
+            <h3>Connection Required</h3>
+            <p>Not connected to Internet Computer. Please check your dfx setup and try reconnecting.</p>
+          </div>
+        ) : notes.length === 0 ? (
+          <div style={{ padding: '15px', textAlign: 'center', border: '1px solid #ddd', backgroundColor: '#f8f9fa', color: '#666', borderRadius: '8px' }}>
+            <h3>No Notes</h3>
+            <p>{isLoading ? "Loading notes..." : "No notes yet. Add your first note!"}</p>
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: '15px', gridTemplateColumns: 'repeat(auto-fill, minmax(250px, 1fr))', marginTop: '15px' }}>
+            {notes.map((note) => (
+              <div key={note.id} style={{ border: '1px solid #ccc', borderRadius: '8px', padding: '15px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', backgroundColor: 'white', opacity: isLoading ? 0.7 : 1 }}>
+                <h3 style={{ marginTop: '0', marginBottom: '10px', fontSize: '1.2em', color: '#333', wordBreak: 'break-word' }}>{note.title}</h3>
+                <p style={{ fontSize: '0.9em', color: '#555', lineHeight: '1.5', wordBreak: 'break-word' }}>{note.content}</p>
+                <small style={{ color: '#777', display: 'block', marginTop: '10px' }}>ID: {note.id}</small>
+                <div style={{ display: 'flex', gap: '10px', marginTop: '15px' }}>
+                  <button
+                    onClick={() => startEditing(note)}
+                    disabled={isLoading || !isConnected}
+                    style={{ padding: '8px 12px', backgroundColor: '#ffc107', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => deleteNote(note.id)}
+                    disabled={isLoading || !isConnected}
+                    style={{ padding: '8px 12px', backgroundColor: '#dc3545', color: 'white', border: 'none', borderRadius: '5px', cursor: 'pointer', opacity: (isLoading || !isConnected) ? 0.6 : 1 }}
+                  >
+                    Delete
+                  </button>
                 </div>
-                <p className="text-gray-700 whitespace-pre-wrap">{note.content}</p>
               </div>
-            ))
-          )}
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Setup Instructions */}
+      <div style={{ marginTop: '30px', padding: '20px', border: `1px solid ${isConnected ? '#a8e6cf' : '#ffcccb'}`, backgroundColor: isConnected ? '#e6ffe6' : '#fff0f0', borderRadius: '8px', fontSize: '0.9em' }}>
+        <h3 style={{ marginTop: '0', color: isConnected ? '#28a745' : '#dc3545' }}>
+          {isConnected ? "✅ Connected to Internet Computer" : "❌ Connection Required"}
+        </h3>
+        <div style={{ padding: '10px', border: '1px solid #ddd', backgroundColor: '#f8f9fa', borderRadius: '5px', marginBottom: '15px', color: '#555' }}>
+          <h4 style={{ margin: '0', fontSize: '1em' }}>Current Configuration:</h4>
+          <p style={{ margin: '5px 0 0' }}>• Backend Canister: {BACKEND_CANISTER_ID}</p>
+          <p style={{ margin: '0' }}>• Ledger Canister: {LEDGER_CANISTER_ID}</p>
+          <p style={{ margin: '0' }}>• Host: {HOST}</p>
+          <p style={{ margin: '0' }}>• Status: {isConnected ? "🟢 Connected" : "🔴 Disconnected"}</p>
         </div>
+
+        {!isConnected && (
+          <div style={{ padding: '10px', border: '1px solid #ffc107', backgroundColor: '#fffbe6', color: '#856404', borderRadius: '5px' }}>
+            <h4 style={{ margin: '0', fontSize: '1em' }}>To connect to Internet Computer:</h4>
+            <p style={{ margin: '5px 0 0' }}>1. Start your local IC replica: <code style={{ backgroundColor: '#eee', padding: '2px 4px', borderRadius: '3px' }}>dfx start</code></p>
+            <p style={{ margin: '0' }}>2. Deploy your canisters: <code style={{ backgroundColor: '#eee', padding: '2px 4px', borderRadius: '3px' }}>dfx deploy</code></p>
+            <p style={{ margin: '0' }}>3. Make sure canister IDs match your deployment</p>
+            <p style={{ margin: '0' }}>4. Open your browser to the frontend URL provided by dfx</p>
+          </div>
+        )}
+
+        <p style={{ marginTop: '15px', fontWeight: 'bold', color: isConnected ? '#28a745' : '#dc3545' }}>
+          Features: Real IC Integration Only • Token Approvals • CRUD Operations • Error Handling
+        </p>
       </div>
     </div>
   );
-};
+}
 
-export default NotesApp;
+export default App;
