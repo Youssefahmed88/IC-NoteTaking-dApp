@@ -7,6 +7,11 @@ use ic_stable_structures::{
     StableBTreeMap, DefaultMemoryImpl,
 };
 use std::{borrow::Cow, cell::RefCell};
+use ic_cdk::api::msg_caller;
+use icrc_ledger_types::icrc1::account::Account;
+use icrc_ledger_types::icrc1::transfer::{BlockIndex, NumTokens};
+use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
+use serde::Serialize;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StorablePrincipal(Principal);
@@ -68,39 +73,17 @@ thread_local! {
 }
 
 // --- Ledger Related Structs ---
-#[derive(CandidType, Deserialize)]
-struct Account {
-    owner: Principal,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    subaccount: Option<Vec<u8>>,
-}
 
-#[derive(CandidType, Deserialize)]
-struct TransferArg {
-    from_subaccount: Option<Vec<u8>>,
-    to: Account,
-    amount: Nat,               
-    fee: Option<Nat>,          
-    memo: Option<Vec<u8>>,
-    created_at_time: Option<u64>,
+#[derive(CandidType, Deserialize, Serialize)]
+pub struct TransferArgs {
+    amount: NumTokens,
+    to_account: Account,
 }
-
 
 #[derive(CandidType, Deserialize)]
 enum TransferResult {
     Ok(u64),
-    Err(TransferError),
-}
-
-#[derive(CandidType, Deserialize, Debug)]
-enum TransferError {
-    InsufficientFunds { balance: u64 },
-    BadFee { expected_fee: u64 },
-    TxTooOld { allowed_window_nanos: u64 },
-    CreatedInFuture,
-    Duplicate { duplicate_of: u64 },
-    TemporarilyUnavailable,
-    GenericError { error_code: u64, message: String },
+    Err(TransferFromError),
 }
 
 const LEDGER_CANISTER_ID: &str = "uxrrr-q7777-77774-qaaaq-cai";
@@ -133,33 +116,37 @@ async fn charge_user(user: Principal, amount: u64) -> Result<u64, String> {
         subaccount: None,
     };
 
-    let transfer_arg = TransferArg {
-        from_subaccount: None,
+    let transfer_from_arg = TransferFromArgs {
+        from: Account {
+            owner: msg_caller(),
+            subaccount: None,
+        },
         to: to_account,
-        amount: amount.into(),               
+        amount: Nat::from(amount),  
+        spender_subaccount: None,             
         fee: Some(Nat::from(10_000u64)),     
         memo: None,
         created_at_time: None,
     };
 
-    let result: (TransferResult,) = call(
+    let result: (Result<Nat, TransferFromError>,) = call(
         Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
-        "icrc1_transfer",
-        (transfer_arg,),
+        "icrc2_transfer_from",
+        (transfer_from_arg,),
     )
     .await
     .map_err(|e| format!("Transfer failed: {:?}", e))?;
 
     match result.0 {
-        TransferResult::Ok(tx_id) => Ok(tx_id),
-        TransferResult::Err(e) => Err(format!("Charge failed: {:?}", e)),
+        Ok(tx_id_nat) => tx_id_nat.0.to_u64().ok_or("Tx ID too large".into()),
+        Err(e) => Err(format!("Charge failed: {:?}", e)),
     }
 }
 
 // ---- Canister Functions ----
 
 #[update]
-async fn add_note(key: u64, value: Note) -> Result<Note, String> {
+pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
     let user = ic_cdk::caller();
     let balance = check_balance(user).await?;
 
@@ -182,27 +169,36 @@ async fn add_note(key: u64, value: Note) -> Result<Note, String> {
 }
 
 #[update]
-fn update_note(key: u64, value: Note) -> Option<Note> {
+pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
+    let user = ic_cdk::caller();
+    let balance = check_balance(user).await?;
+
+    if balance < COST_PER_NOTE {
+        return Err("Insufficient token balance.".into());
+    }
+
     let note = Note {
         title: value.title,
         content: value.content,
     };
 
+    charge_user(user, COST_PER_NOTE).await?;
+
     NOTES_MAP.with(|notes| {
         notes.borrow_mut().insert((StorablePrincipal(ic_cdk::caller()), key), note.clone());
-        Some(note)
-    })
+    });
+    Ok(note)
 }
 
 #[query]
-fn get_note(id: u64) -> Option<Note> {
+pub fn get_note(id: u64) -> Option<Note> {
     NOTES_MAP.with(|notes| {
         notes.borrow().get(&(StorablePrincipal(ic_cdk::caller()), id)).clone()
     })
 }
 
 #[query]
-fn list_notes() -> Vec<(u64, Note)> {
+pub fn list_notes() -> Vec<(u64, Note)> {
     NOTES_MAP.with(|notes| {
         notes
             .borrow()
@@ -219,18 +215,33 @@ fn list_notes() -> Vec<(u64, Note)> {
 }
 
 #[update]
-fn delete_note(id: u64) -> Result<String, String> {
-    let key = (StorablePrincipal(ic_cdk::caller()), id);
+pub async fn delete_note(id: u64) -> Result<String, String> {
+    let user = ic_cdk::caller();
+    let balance = check_balance(user).await?;
 
-    NOTES_MAP.with(|notes| {
+    if balance < COST_PER_NOTE {
+        return Err("Insufficient token balance.".into());
+    }
+
+    let key = (StorablePrincipal(user), id);
+
+    let note_existed = NOTES_MAP.with(|notes| {
         let mut notes = notes.borrow_mut();
         if notes.contains_key(&key) {
             notes.remove(&key);
-            Ok(format!("Note {} deleted.", id))
+            true
         } else {
-            Err(format!("Note {} not found or not yours.", id))
+            false
         }
-    })
+    });
+
+    if note_existed {
+        charge_user(user, COST_PER_NOTE).await?;
+        Ok(format!("Note {} deleted.", id))
+    } else {
+        Err(format!("Note {} not found or not yours.", id))
+    }
 }
+
 
 export_candid!();
