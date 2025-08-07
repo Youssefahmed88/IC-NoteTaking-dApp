@@ -29,6 +29,6 @@ service : {
   delete_note : (nat64) -> (Result_1);
   get_note : (nat64) -> (opt Note) query;
   list_notes : () -> (vec record { nat64; Note }) query;
-  update_note : (nat64, Note) -> (opt Note);
+  update_note : (nat64, Note) -> (variant { Ok : Note; Err : text });
   icrc2_transfer: (TransferFromArgs) -> (TransferFromResult);
 }
