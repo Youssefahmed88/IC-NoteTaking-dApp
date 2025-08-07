@@ -150,6 +150,23 @@ pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
     let user = ic_cdk::caller();
     let balance = check_balance(user).await?;
 
+    if key == 0 {
+        return Err("Key must be a non-zero value.".into());
+    }
+
+    if value.title.trim().is_empty() || value.content.trim().is_empty() {
+        return Err("Title and content cannot be empty.".into());
+    }
+
+    // check if key already exists for the user
+    let exists = NOTES_MAP.with(|notes| {
+        notes.borrow().contains_key(&(StorablePrincipal(user), key))
+    });
+
+    if exists {
+        return Err("Note with this key already exists.".into());
+    }
+
     if balance < COST_PER_NOTE {
         return Err("Insufficient token balance.".into());
     }
@@ -168,6 +185,7 @@ pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
     Ok(note)
 }
 
+
 #[update]
 pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
     let user = ic_cdk::caller();
@@ -175,6 +193,14 @@ pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
 
     if balance < COST_PER_NOTE {
         return Err("Insufficient token balance.".into());
+    }
+
+    let exists = NOTES_MAP.with(|notes| {
+        notes.borrow().contains_key(&(StorablePrincipal(user), key))
+    });
+
+    if !exists {
+        return Err("Note not found.".into());
     }
 
     let note = Note {
@@ -185,8 +211,9 @@ pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
     charge_user(user, COST_PER_NOTE).await?;
 
     NOTES_MAP.with(|notes| {
-        notes.borrow_mut().insert((StorablePrincipal(ic_cdk::caller()), key), note.clone());
+        notes.borrow_mut().insert((StorablePrincipal(user), key), note.clone());
     });
+
     Ok(note)
 }
 
