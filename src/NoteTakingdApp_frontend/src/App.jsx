@@ -24,47 +24,72 @@ const App = () => {
 
     await client.login({
       identityProvider: "https://identity.ic0.app/#authorize",
-        onSuccess: async () => {
-          const identity = client.getIdentity();
-          const principal = identity.getPrincipal();
-          setPrincipal(principal);
-          console.log("Logged in as:", principal.toText());
+      onSuccess: async () => {
+        const identity = client.getIdentity();
+        const principal = identity.getPrincipal();
+        setPrincipal(principal);
+        console.log("Logged in as:", principal.toText());
 
-          const agent = new HttpAgent({ identity });
+        const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
+        if (process.env.DFX_NETWORK !== "ic") {
           await agent.fetchRootKey();
-          const backendActor = Actor.createActor(idlFactory, {
-            agent,
-            canisterId,
-          });
-          setBackend(backendActor);
-        },
-      });
+        }
+        const backendActor = Actor.createActor(idlFactory, {
+          agent,
+          canisterId,
+        });
+        setBackend(backendActor);
+      },
+    });
   };
 
-
   useEffect(() => {
-  async function init() {
-    let identity = undefined;
+    async function init() {
+      if (!authClient) return;
 
-    if (authClient) {
-      identity = authClient.getIdentity(); 
+      const identity = authClient.getIdentity();
+      const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
+      if (process.env.DFX_NETWORK !== "ic") {
+        await agent.fetchRootKey();
+      }
+      const backendActor = Actor.createActor(idlFactory, { agent, canisterId });
+      setBackend(backendActor);
+
+      try {
+        const principal = await agent.getPrincipal();
+        console.log("Principal:", principal.toText());
+      } catch (err) {
+        console.error("Error getting principal:", err);
+      }
     }
 
-    const agent = new HttpAgent({ identity }); // لو identity undefined هيشتغل anonymous عادي
-    await agent.fetchRootKey();
-    const backendActor = Actor.createActor(idlFactory, { agent, canisterId });
-    setBackend(backendActor);
+    init();
+  }, [authClient]);
 
-    try {
-      const principal = await agent.getPrincipal();
-      console.log("Principal:", principal.toText());
-    } catch (err) {
-      console.log("Anonymous user, no principal available yet.");
+
+    useEffect(() => {
+    async function init() {
+      let identity = undefined;
+
+      if (authClient) {
+        identity = authClient.getIdentity(); 
+      }
+
+      const agent = new HttpAgent({ identity });
+      await agent.fetchRootKey();
+      const backendActor = Actor.createActor(idlFactory, { agent, canisterId });
+      setBackend(backendActor);
+
+      try {
+        const principal = await agent.getPrincipal();
+        console.log("Principal:", principal.toText());
+      } catch (err) {
+        console.log("Anonymous user, no principal available yet.");
+      }
     }
-  }
 
-  init();
-}, [authClient]); // ← ركز هنا، بقى يتفاعل مع تغير قيمة authClient
+    init();
+  }, [authClient]);
 
 
   const addNote = async () => {
@@ -122,21 +147,39 @@ const App = () => {
   };
 
   const approveSpending = async () => {
-    const agent = new HttpAgent();
-    await agent.fetchRootKey();
-
-    const ledgerActor = Actor.createActor(ledgerIdl, {
-      agent,
-      canisterId: ledgerId,
-    });
+    if (!authClient) {
+      setMsg("Error: Please log in first.");
+      return;
+    }
 
     try {
+      const identity = authClient.getIdentity();
+      const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
+      // Explicitly fetch root key for local DFX replica
+      if (process.env.DFX_NETWORK !== "ic") {
+        await agent.fetchRootKey();
+      }
+
+      const ledgerActor = Actor.createActor(ledgerIdl, {
+        agent,
+        canisterId: ledgerId,
+      });
+
       const amt = BigInt(amount);
-      const expiresOpt = expiresAt ? [BigInt(expiresAt)] : [];
+      const expiresOpt = expiresAt ? [BigInt(Number(expiresAt) * 1_000_000_000)] : []; // Convert seconds to nanoseconds
+
+      // Log principal and balance for debugging
+      console.log("Approving as:", identity.getPrincipal().toText());
+      const balance = await ledgerActor.icrc1_balance_of({
+        owner: identity.getPrincipal(),
+        subaccount: [],
+      });
+      console.log("Balance:", balance.toString());
+
       const res = await ledgerActor.icrc2_approve({
         from_subaccount: [], // null
         spender: {
-          owner: Principal.fromText("uzt4z-lp777-77774-qaabq-cai"), // backend canister
+          owner: Principal.fromText("uzt4z-lp777-77774-qaabq-cai"), // Verify this is correct
           subaccount: [], // null
         },
         amount: amt,
@@ -147,14 +190,28 @@ const App = () => {
         created_at_time: [],
       });
 
-      console.log("Approval result:", res);
-      setMsg("Approval " + ("Ok" in res ? "successful!" : "failed: " + res.Err));
+      if ("Ok" in res) {
+        setMsg("Approval successful!");
+      } else {
+        console.error("Approval error details:", res.Err);
+        setMsg(
+          "Approval failed: " +
+            JSON.stringify(res.Err, (key, value) =>
+              typeof value === "bigint" ? value.toString() : value
+            )
+        );
+      }
     } catch (err) {
-      console.error(err);
-      setMsg("Error approving: " + err.message);
+      console.error("Caught error:", err);
+      setMsg(
+        "Error approving: " +
+          (err.message ||
+            JSON.stringify(err, (key, value) =>
+              typeof value === "bigint" ? value.toString() : value
+            ))
+      );
     }
   };
-
 return (
   <div>
     <h1>Note Taking dApp</h1>
