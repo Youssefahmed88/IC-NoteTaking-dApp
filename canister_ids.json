@@ -1,0 +1,11 @@
+{
+  "NoteTakingdApp_backend": {
+    "ic": "vrdif-fiaaa-aaaam-aeogq-cai"
+  },
+  "NoteTakingdApp_frontend": {
+    "ic": "vyadz-taaaa-aaaam-aeoha-cai"
+  },
+  "icrc1_ledger_canister": {
+    "ic": "v7bfn-6yaaa-aaaam-aeohq-cai"
+  }
+}

@@ -1,34 +1,13 @@
 type Note = record { title : text; content : text };
 type Result = variant { Ok : Note; Err : text };
 type Result_1 = variant { Ok : text; Err : text };
-
-type TransferFromArgs = record {
-  from : principal;
-  to : record { owner : principal; subaccount : opt blob };
-  amount : nat;
-  fee : opt nat;
-  memo : opt blob;
-  created_at_time : opt nat64;
-};
-
-type TransferFromResult = variant {
-  Ok : nat;
-  Err : variant {
-    InsufficientFunds : record { balance : nat };
-    BadFee : record { expected_fee : nat };
-    CreatedInFuture : record { ledger_time : nat64 };
-    TooOld : null;
-    Duplicate : null;
-    TemporarilyUnavailable : null;
-    GenericError : record { error_code : nat; message : text };
-  };
-};
-
+type Result_2 = variant { Ok : float64; Err : text };
 service : {
   add_note : (nat64, Note) -> (Result);
+  collect_icp_and_send_eth : (nat) -> (Result_1);
   delete_note : (nat64) -> (Result_1);
   get_note : (nat64) -> (opt Note) query;
   list_notes : () -> (vec record { nat64; Note }) query;
-  update_note : (nat64, Note) -> (variant { Ok : Note; Err : text });
-  icrc2_transfer: (TransferFromArgs) -> (TransferFromResult);
+  test_icp_price : (float64) -> (Result_2);
+  update_note : (nat64, Note) -> (Result);
 }

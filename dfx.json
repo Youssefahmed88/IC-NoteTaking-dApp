@@ -10,6 +10,16 @@
       "candid": "https://raw.githubusercontent.com/dfinity/ic/615045e039c57ed842c689e49a07ab3de3a8a781/rs/ledger_suite/icrc1/ledger/ledger.did",
       "wasm": "https://download.dfinity.systems/ic/615045e039c57ed842c689e49a07ab3de3a8a781/canisters/ic-icrc1-ledger.wasm.gz"
     },
+    "evm_rpc": {
+      "type": "custom",
+      "candid": "https://github.com/internet-computer-protocol/evm-rpc-canister/releases/latest/download/evm_rpc.did",
+      "wasm": "https://github.com/internet-computer-protocol/evm-rpc-canister/releases/latest/download/evm_rpc.wasm.gz",
+      "remote": {
+        "id": {
+          "ic": "7hfb6-caaaa-aaaar-qadga-cai"
+        }
+      }
+    },
     "NoteTakingdApp_frontend": {
       "dependencies": [
         "NoteTakingdApp_backend"
@@ -21,6 +31,7 @@
       "workspace": "NoteTakingdApp_frontend"
     }
   },
+
   "defaults": {
     "build": {
       "args": "",

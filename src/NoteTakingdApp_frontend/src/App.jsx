@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { HttpAgent, Actor } from "@dfinity/agent";
 import { Principal } from "@dfinity/principal";
-import { AuthClient } from "@dfinity/auth-client";
 import { idlFactory, canisterId } from "../../declarations/NoteTakingdApp_backend";
 import { idlFactory as ledgerIdl, canisterId as ledgerId } from "../../declarations/icrc1_ledger_canister";
 
@@ -15,82 +14,18 @@ const App = () => {
   const [backend, setBackend] = useState(null);
   const [amount, setAmount] = useState("");
   const [expiresAt, setExpiresAt] = useState("");
-  const [authClient, setAuthClient] = useState(null);
-  const [principal, setPrincipal] = useState(null);
-
-  const login = async () => {
-    const client = await AuthClient.create();
-    setAuthClient(client);
-
-    await client.login({
-      identityProvider: "https://identity.ic0.app/#authorize",
-      onSuccess: async () => {
-        const identity = client.getIdentity();
-        const principal = identity.getPrincipal();
-        setPrincipal(principal);
-        console.log("Logged in as:", principal.toText());
-
-        const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
-        if (process.env.DFX_NETWORK !== "ic") {
-          await agent.fetchRootKey();
-        }
-        const backendActor = Actor.createActor(idlFactory, {
-          agent,
-          canisterId,
-        });
-        setBackend(backendActor);
-      },
-    });
-  };
 
   useEffect(() => {
     async function init() {
-      if (!authClient) return;
-
-      const identity = authClient.getIdentity();
-      const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
-      if (process.env.DFX_NETWORK !== "ic") {
-        await agent.fetchRootKey();
-      }
+      const agent = new HttpAgent();
+      await agent.fetchRootKey(); 
       const backendActor = Actor.createActor(idlFactory, { agent, canisterId });
       setBackend(backendActor);
-
-      try {
-        const principal = await agent.getPrincipal();
-        console.log("Principal:", principal.toText());
-      } catch (err) {
-        console.error("Error getting principal:", err);
-      }
+      const principal = await agent.getPrincipal();
+      console.log("Anonymous principal:", principal.toText());
     }
-
     init();
-  }, [authClient]);
-
-
-    useEffect(() => {
-    async function init() {
-      let identity = undefined;
-
-      if (authClient) {
-        identity = authClient.getIdentity(); 
-      }
-
-      const agent = new HttpAgent({ identity });
-      await agent.fetchRootKey();
-      const backendActor = Actor.createActor(idlFactory, { agent, canisterId });
-      setBackend(backendActor);
-
-      try {
-        const principal = await agent.getPrincipal();
-        console.log("Principal:", principal.toText());
-      } catch (err) {
-        console.log("Anonymous user, no principal available yet.");
-      }
-    }
-
-    init();
-  }, [authClient]);
-
+  }, []);
 
   const addNote = async () => {
     const res = await backend.add_note(BigInt(key), { title, content });
@@ -147,39 +82,21 @@ const App = () => {
   };
 
   const approveSpending = async () => {
-    if (!authClient) {
-      setMsg("Error: Please log in first.");
-      return;
-    }
+    const agent = new HttpAgent();
+    await agent.fetchRootKey();
+
+    const ledgerActor = Actor.createActor(ledgerIdl, {
+      agent,
+      canisterId: ledgerId,
+    });
 
     try {
-      const identity = authClient.getIdentity();
-      const agent = new HttpAgent({ identity, host: "http://localhost:4943" });
-      // Explicitly fetch root key for local DFX replica
-      if (process.env.DFX_NETWORK !== "ic") {
-        await agent.fetchRootKey();
-      }
-
-      const ledgerActor = Actor.createActor(ledgerIdl, {
-        agent,
-        canisterId: ledgerId,
-      });
-
       const amt = BigInt(amount);
-      const expiresOpt = expiresAt ? [BigInt(Number(expiresAt) * 1_000_000_000)] : []; // Convert seconds to nanoseconds
-
-      // Log principal and balance for debugging
-      console.log("Approving as:", identity.getPrincipal().toText());
-      const balance = await ledgerActor.icrc1_balance_of({
-        owner: identity.getPrincipal(),
-        subaccount: [],
-      });
-      console.log("Balance:", balance.toString());
-
+      const expiresOpt = expiresAt ? [BigInt(expiresAt)] : [];
       const res = await ledgerActor.icrc2_approve({
         from_subaccount: [], // null
         spender: {
-          owner: Principal.fromText("uzt4z-lp777-77774-qaabq-cai"), // Verify this is correct
+          owner: Principal.fromText("uzt4z-lp777-77774-qaabq-cai"), // backend canister
           subaccount: [], // null
         },
         amount: amt,
@@ -190,28 +107,14 @@ const App = () => {
         created_at_time: [],
       });
 
-      if ("Ok" in res) {
-        setMsg("Approval successful!");
-      } else {
-        console.error("Approval error details:", res.Err);
-        setMsg(
-          "Approval failed: " +
-            JSON.stringify(res.Err, (key, value) =>
-              typeof value === "bigint" ? value.toString() : value
-            )
-        );
-      }
+      console.log("Approval result:", res);
+      setMsg("Approval " + ("Ok" in res ? "successful!" : "failed: " + res.Err));
     } catch (err) {
-      console.error("Caught error:", err);
-      setMsg(
-        "Error approving: " +
-          (err.message ||
-            JSON.stringify(err, (key, value) =>
-              typeof value === "bigint" ? value.toString() : value
-            ))
-      );
+      console.error(err);
+      setMsg("Error approving: " + err.message);
     }
   };
+
 return (
   <div>
     <h1>Note Taking dApp</h1>
@@ -273,14 +176,7 @@ return (
       <p>{msg}</p>
     </div>
 
-      <div>
-        {!principal ? (
-        <button onClick={login}>Login with Internet Identity</button>
-        ) : (
-        <p>Logged in as: {principal.toText()}</p>
-      )}
     </div>
-  </div>
   );
 };
 
