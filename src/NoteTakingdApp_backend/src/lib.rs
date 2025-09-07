@@ -1,5 +1,6 @@
-use candid::{CandidType, Decode, Deserialize, Encode, Principal};
+use candid::{CandidType, Decode, Deserialize, Encode, Principal, Nat};
 use ic_cdk::{call, export_candid, query, update};
+use crate::call::Call;
 use num_traits::ToPrimitive;
 use ic_stable_structures::{
     memory_manager::{MemoryId, MemoryManager, VirtualMemory},
@@ -9,9 +10,20 @@ use ic_stable_structures::{
 use std::{borrow::Cow, cell::RefCell};
 use ic_cdk::api::msg_caller;
 use icrc_ledger_types::icrc1::account::Account;
-use icrc_ledger_types::icrc1::transfer::{BlockIndex, NumTokens};
+use icrc_ledger_types::icrc1::transfer::NumTokens;
 use icrc_ledger_types::icrc2::transfer_from::{TransferFromArgs, TransferFromError};
 use serde::Serialize;
+use ic_cdk::api::management_canister::http_request::{
+    http_request,
+    HttpResponse,
+    CanisterHttpRequestArgument,
+    HttpMethod,
+    HttpHeader,
+    TransformContext,
+    TransformFunc,
+    TransformArgs,
+};
+use candid::Func;use std::str;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct StorablePrincipal(Principal);
@@ -72,7 +84,13 @@ thread_local! {
     );
 }
 
-// --- Ledger Related Structs ---
+fn transform(args: TransformArgs) -> HttpResponse {
+    HttpResponse {
+        status: args.response.status,
+        body: args.response.body,
+        headers: vec![], // strip all headers
+    }
+}
 
 #[derive(CandidType, Deserialize, Serialize)]
 pub struct TransferArgs {
@@ -94,12 +112,10 @@ const BACKEND_CANISTER: &str = "uzt4z-lp777-77774-qaabq-cai";
 const DEX_CANISTER_ID: &str = "dwahc-eyaaa-aaaag-qcgnq-cai";
 const CKETH_CANISTER_ID: &str = "ss2fx-dyaaa-aaaar-qacoq-cai";
 
-// ---- Helper Functions ----
-
 async fn check_balance(user: Principal) -> Result<u64, String> {
     let account = Account { owner: user, subaccount: None };
 
-    let (balance_nat,): (Nat,) = call(
+    let (balance_nat,): (Nat,) = ic_cdk::api::call::call(
         Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
         "icrc1_balance_of",
         (account,),
@@ -112,10 +128,7 @@ async fn check_balance(user: Principal) -> Result<u64, String> {
     Ok(balance_u64)
 }
 
-
-use candid::Nat;
-
-async fn charge_user(user: Principal, amount: u64) -> Result<u64, String> {
+async fn charge_user(_user: Principal, amount: u64) -> Result<u64, String> {
     let to_account = Account {
         owner: Principal::from_text("uzt4z-lp777-77774-qaabq-cai").unwrap(), // Backend's principal
         subaccount: None,
@@ -127,14 +140,14 @@ async fn charge_user(user: Principal, amount: u64) -> Result<u64, String> {
             subaccount: None,
         },
         to: to_account,
-        amount: Nat::from(amount),  
-        spender_subaccount: None,             
-        fee: Some(Nat::from(10_000u64)),     
+        amount: Nat::from(amount),
+        spender_subaccount: None,
+        fee: Some(Nat::from(10_000u64)),
         memo: None,
         created_at_time: None,
     };
 
-    let result: (Result<Nat, TransferFromError>,) = call(
+    let result: (Result<Nat, TransferFromError>,) = ic_cdk::api::call::call(
         Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
         "icrc2_transfer_from",
         (transfer_from_arg,),
@@ -148,13 +161,43 @@ async fn charge_user(user: Principal, amount: u64) -> Result<u64, String> {
     }
 }
 
-use std::str;
-use ic_cdk::management_canister::{http_request, HttpRequestArgs, HttpMethod, HttpHeader};
+use icrc_ledger_types::icrc1::transfer::TransferArg;
 
+#[update]
+pub async fn deposit_icp_to_dex(amount: Nat) -> Result<Nat, String> {
+    // حساب الـ DEX canister في الـ ledger
+    let dex_account = Account {
+        owner: Principal::from_text(DEX_CANISTER_ID).unwrap(),
+        subaccount: None,
+    };
+
+    // تحويل من حساب الكانيستر (انت) → حساب الـ DEX
+    let transfer_arg = TransferArg {
+        from_subaccount: None,
+        to: dex_account,
+        amount: amount.clone(),
+        fee: Some(Nat::from(10_000u64)),
+        memo: None,
+        created_at_time: None,
+    };
+
+    let result: (Result<Nat, TransferError>,) = ic_cdk::call(
+        Principal::from_text(LEDGER_CANISTER_ID).unwrap(),
+        "icrc1_transfer",
+        (transfer_arg,),
+    )
+    .await
+    .map_err(|e| format!("Deposit failed: {:?}", e))?;
+
+    result.0.map_err(|e| format!("Deposit error: {:?}", e))
+}
+
+
+use ic_cdk::api::canister_self;
 async fn fetch_price_usd(pair: &str) -> Result<f64, String> {
     let url = format!("https://api.exchange.coinbase.com/products/{}/ticker", pair);
 
-    let request = HttpRequestArgs {
+    let args = CanisterHttpRequestArgument {
         url,
         method: HttpMethod::GET,
         headers: vec![HttpHeader {
@@ -162,12 +205,17 @@ async fn fetch_price_usd(pair: &str) -> Result<f64, String> {
             value: "price-feed".to_string(),
         }],
         body: None,
-        max_response_bytes: Some(2000),
-        transform: None,
+        max_response_bytes: Some(2048), // Added required field
+        transform: Some(TransformContext {
+            function: TransformFunc(Func {
+                principal: canister_self(),
+                method: "transform".to_string(),
+            }),
+            context: vec![],
+        }),
     };
 
-    // send request
-    let response = http_request(&request)
+    let (response,): (HttpResponse,) = http_request(args, 10_000)
         .await
         .map_err(|e| format!("HTTP request failed: {:?}", e))?;
 
@@ -187,57 +235,54 @@ async fn fetch_price_usd(pair: &str) -> Result<f64, String> {
     Err("Price not found in response".into())
 }
 
-#[update]
-pub async fn test_icp_price(icp_amount: f64) -> Result<f64, String> {
-    let icp_usd  = fetch_price_usd("ICP-USD").await?;
-    let eth_usd = fetch_price_usd("ETH-USD").await?;
-
-    if eth_usd == 0.0 {
-        return Err("ETH price is zero, cannot compute ICP/ETH".into());
-    }
-    
-    let price_ratio = eth_usd / icp_usd;
-    let eth_amount = price_ratio * icp_amount;
-    Ok(eth_amount)
+// Placeholder for test_icp_price (replace with actual implementation)
+async fn test_icp_price(_icp_amount: f64) -> Result<f64, String> {
+    // This is a placeholder. Replace with actual logic to fetch ICP price.
+    // For example, you might call fetch_price_usd("ICP-USD") and convert the amount.
+    Ok(100.0) // Placeholder return value
 }
 
-use ic_cdk::{api};
-use ic_cdk::api::call::call_with_payment128;
-
-/// 1) Swap ICP -> ckETH
 #[derive(CandidType, Deserialize)]
 struct SwapArgs {
-    from_token: String, // e.g. "ICP" or canister id
-    to_token: String,   // e.g. canister id for ckETH
-    amount_in: Nat,     // amount of ICP (in e8s or appropriate unit)
-    min_amount_out: Nat, // slippage protection
-    recipient: Principal, // who receives ckETH 
+    amountIn: String,
+    zeroForOne: bool,
+    amountOutMinimum: String,
+}
+
+#[derive(CandidType, Deserialize, Debug)]
+enum SwapError {
+    CommonError,
+    InternalError(String),
+    UnsupportedToken(String),
+    InsufficientFunds,
 }
 
 #[derive(CandidType, Deserialize)]
-struct SwapResult {
-    amount_out: Nat,
+enum SwapResult {
+    ok(Nat),
+    err(SwapError),
 }
 
+#[update]
 pub async fn swap_icp_to_cketh(amount_icp: Nat, min_cketh: Nat) -> Result<Nat, String> {
     let dex = Principal::from_text(DEX_CANISTER_ID).map_err(|e| e.to_string())?;
+
     let args = SwapArgs {
-        from_token: "ICP".to_string(),
-        to_token: "ckETH".to_string(),
-        amount_in: amount_icp,
-        min_amount_out: min_cketh,
-        recipient: api::id(), // BACKEND_CANISTER
+        amountIn: amount_icp.0.to_string(),
+        zeroForOne: true,
+        amountOutMinimum: min_cketh.0.to_string(),
     };
- 
-    let cycles: u128 = 2_000_000_000u128;
-    let (res,): (SwapResult,) = call_with_payment128(dex, "swap", (args,), cycles)
+
+    let res: (SwapResult,) = call(dex, "swap", (args,))
         .await
         .map_err(|e| format!("Dex swap failed: {:?}", e))?;
 
-    Ok(res.amount_out)
+    match res.0 {
+        SwapResult::ok(amount) => Ok(amount),
+        SwapResult::err(e) => Err(format!("Dex error: {:?}", e)),
+    }
 }
 
-/// 2) Redeem ckETH -> send ETH to MetaMask
 #[derive(CandidType, Deserialize)]
 struct CkWithdrawArgs {
     to_eth_address: Vec<u8>, // 20 bytes
@@ -246,11 +291,13 @@ struct CkWithdrawArgs {
 
 #[derive(CandidType, Deserialize)]
 struct CkWithdrawResult {
-    ticket: String, // tx id 
+    ticket: String, // tx id
 }
 
 fn eth_addr_to_bytes() -> Result<Vec<u8>, String> {
-    let s = ETH_RECEIVER_ADDRESS.strip_prefix("0x").unwrap_or(ETH_RECEIVER_ADDRESS);
+    let s = ETH_RECEIVER_ADDRESS
+        .strip_prefix("0x")
+        .unwrap_or(ETH_RECEIVER_ADDRESS);
     let bytes = hex::decode(s).map_err(|e| format!("bad eth hex: {:?}", e))?;
     if bytes.len() != 20 {
         return Err("ETH address must be 20 bytes".into());
@@ -261,45 +308,50 @@ fn eth_addr_to_bytes() -> Result<Vec<u8>, String> {
 pub async fn redeem_cketh_to_eth(amount_cketh: Nat) -> Result<String, String> {
     let ck = Principal::from_text(CKETH_CANISTER_ID).map_err(|e| e.to_string())?;
     let recipient_bytes = eth_addr_to_bytes()?;
-    let args = CkWithdrawArgs { to_eth_address: recipient_bytes, amount: amount_cketh };
+    let args = CkWithdrawArgs {
+        to_eth_address: recipient_bytes,
+        amount: amount_cketh,
+    };
 
-    let cycles: u128 = 20_000_000_000u128;
+    // Encode arguments
+    let encoded_args = Encode!(&args).map_err(|e| e.to_string())?;
 
-    let (res,): (CkWithdrawResult,) = call_with_payment128(ck, "withdraw", (args,), cycles)
+    // Call the canister
+    let (res_bytes,): (Vec<u8>,) = call(ck, "withdraw", (encoded_args,))
         .await
         .map_err(|e| format!("ckETH.withdraw failed: {:?}", e))?;
+
+    // Decode the result
+    let res: CkWithdrawResult = Decode!(&res_bytes, CkWithdrawResult).map_err(|e| e.to_string())?;
 
     Ok(res.ticket)
 }
 
 #[update]
 pub async fn collect_icp_and_send_eth(icp_amount: Nat) -> Result<String, String> {
-    // 0) make sure the user approves the backend canister can charge from his token balance (transfer_from)
+    // 1. Deposit ICP into DEX
+    deposit_icp_to_dex(icp_amount.clone())
+        .await
+        .map_err(|e| format!("Deposit failed: {}", e))?;
 
-    // convert ICP amount -> f64
-    let icp_f64 = icp_amount.0.to_f64().ok_or("Failed to convert ICP amount to f64")?;
+    let min_cketh = Nat::from(0u128);
 
-    // fetch ckETH amount expected
-    let expected_cketh = test_icp_price(icp_f64).await?;
+    // 4. Swap ICP -> ckETH
+    let ck_amount = swap_icp_to_cketh(icp_amount.clone(), min_cketh)
+        .await
+        .map_err(|e| format!("Swap failed: {}", e))?;
 
-    // apply 1% slippage
-    let min_cketh_f64 = expected_cketh * 0.99;
-    let min_cketh = Nat::from(min_cketh_f64 as u128);
-
-    // 2) swap ICP -> ckETH ( recipient = this canister)
-    let ck_amount = swap_icp_to_cketh(icp_amount, min_cketh).await?;
-
-    // 3) redeem ckETH -> ETH (send to metamask_addr)
-    let ticket = redeem_cketh_to_eth(ck_amount).await?;
+    // 5. Redeem ckETH -> ETH
+    let ticket = redeem_cketh_to_eth(ck_amount)
+        .await
+        .map_err(|e| format!("Redeem failed: {}", e))?;
 
     Ok(ticket)
 }
 
-// ---- Canister Functions ----
-
 #[update]
 pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
-    let user = ic_cdk::caller();
+    let user = ic_cdk::api::msg_caller();
     let balance = check_balance(user).await?;
 
     if key == 0 {
@@ -310,7 +362,7 @@ pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
         return Err("Title and content cannot be empty.".into());
     }
 
-    // check if key already exists for the user
+    // Check if key already exists for the user
     let exists = NOTES_MAP.with(|notes| {
         notes.borrow().contains_key(&(StorablePrincipal(user), key))
     });
@@ -319,32 +371,32 @@ pub async fn add_note(key: u64, value: Note) -> Result<Note, String> {
         return Err("Note with this key already exists.".into());
     }
 
-    if balance < COST_PER_NOTE + PROFIT_PER_NOTE{
+    if balance < COST_PER_NOTE + PROFIT_PER_NOTE {
         return Err("Insufficient token balance.".into());
     }
 
     charge_user(user, COST_PER_NOTE + PROFIT_PER_NOTE).await?;
 
-    
     let ticket = collect_icp_and_send_eth(Nat::from(COST_PER_NOTE + PROFIT_PER_NOTE)).await?;
     ic_cdk::println!("✅ ETH sent, redeem ticket: {}", ticket);
-    
+
     let note = Note {
         title: value.title,
         content: value.content,
     };
-    
+
     NOTES_MAP.with(|notes| {
-        notes.borrow_mut().insert((StorablePrincipal(user), key), note.clone());
+        notes
+            .borrow_mut()
+            .insert((StorablePrincipal(user), key), note.clone());
     });
 
-    
     Ok(note)
 }
 
 #[update]
 pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
-    let user = ic_cdk::caller();
+    let user = ic_cdk::api::msg_caller();
     let balance = check_balance(user).await?;
 
     if balance < COST_PER_NOTE + PROFIT_PER_NOTE {
@@ -367,7 +419,9 @@ pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
     charge_user(user, COST_PER_NOTE + PROFIT_PER_NOTE).await?;
 
     NOTES_MAP.with(|notes| {
-        notes.borrow_mut().insert((StorablePrincipal(user), key), note.clone());
+        notes
+            .borrow_mut()
+            .insert((StorablePrincipal(user), key), note.clone());
     });
 
     Ok(note)
@@ -376,7 +430,10 @@ pub async fn update_note(key: u64, value: Note) -> Result<Note, String> {
 #[query]
 pub fn get_note(id: u64) -> Option<Note> {
     NOTES_MAP.with(|notes| {
-        notes.borrow().get(&(StorablePrincipal(ic_cdk::caller()), id)).clone()
+        notes
+            .borrow()
+            .get(&(StorablePrincipal(ic_cdk::api::msg_caller()), id))
+            .clone()
     })
 }
 
@@ -387,7 +444,7 @@ pub fn list_notes() -> Vec<(u64, Note)> {
             .borrow()
             .iter()
             .filter_map(|((owner, id), note)| {
-                if owner.0 == ic_cdk::caller() {
+                if owner.0 == ic_cdk::api::msg_caller() {
                     Some((id, note.clone()))
                 } else {
                     None
@@ -399,10 +456,10 @@ pub fn list_notes() -> Vec<(u64, Note)> {
 
 #[update]
 pub async fn delete_note(id: u64) -> Result<String, String> {
-    let user = ic_cdk::caller();
+    let user = ic_cdk::api::msg_caller();
     let balance = check_balance(user).await?;
 
-    if balance < COST_PER_NOTE + PROFIT_PER_NOTE{
+    if balance < COST_PER_NOTE + PROFIT_PER_NOTE {
         return Err("Insufficient token balance.".into());
     }
 
@@ -425,6 +482,5 @@ pub async fn delete_note(id: u64) -> Result<String, String> {
         Err(format!("Note {} not found or not yours.", id))
     }
 }
-
 
 export_candid!();
